@@ -1,0 +1,3805 @@
+<!doctype html>
+<html _manifest_="manifest.appcache">
+<head>
+	<title>Tighty Deadline</title>
+	<meta name="viewport" id="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="mobile-web-app-capable" content="yes">
+	<meta name="apple-mobile-web-app-capable" content="yes">
+	<meta name="application-name" content="Tighty Deadline">
+	<meta name="apple-mobile-web-app-title" content="Tighty Deadline">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<meta name="msapplication-starturl" content="index.html">
+    <link rel="icon" sizes="192x192" href="icons/icon-192x192.png">
+	<link rel="icon" sizes="128x128" href="icons/icon-128x128.png">
+	<link rel="apple-touch-icon" sizes="128x128" href="icons/icon-128x128.png">
+	<link rel="apple-touch-icon-precomposed" sizes="128x128" href="icons/icon-128x128.png">
+	<link rel="manifest" href="manifest.json">
+	<style>
+	HTML,BODY {
+		width:100%;
+		height:100%;
+		padding: 0;
+		margin: 0;
+	}
+	BODY {				
+		background-color:#101820;
+		overscroll-behavior-y: contain;
+		cursor:pointer;
+		background-image:url('wallpaper.png');
+	}
+	</style>
+</head><body onload="onl()"></body><script>
+
+function onl() {
+
+// --- Game installer
+var Installer=function() {
+	var deferredInstall;
+	if ('serviceWorker' in navigator) {
+		if (!navigator.serviceWorker.controller) {
+		  navigator.serviceWorker.register('worker.js', { scope: './'}).then(function(reg) {
+		    console.log('Service worker has been registered for scope: '+ reg.scope);
+		  });
+		  window.addEventListener('beforeinstallprompt', function(e) {
+				e.preventDefault();
+				deferredInstall = e;
+			});
+		}	
+	}
+	return {
+		canInstall:function() {
+			return !!deferredInstall;
+		},
+		install:function() {
+			deferredInstall.prompt().then(function() {
+				return deferredInstall.userChoice;
+			}).then(function(choice) {
+				deferredInstall=0;
+			}).catch(function(reason) {
+				deferredInstall=0;
+			});
+		}
+	}
+}
+installer=new Installer();
+
+// --- An tiny arcade game engine
+var Arcade=function(G){
+	var DEGTORAD=3.14/180;
+
+	function zIndexSorter(a,b) { return a.zIndex==b.zIndex?0:a.zIndex>b.zIndex?1:-1 }
+
+	var noop=function() {};
+	var arcade,resortZindex;
+	var basicSprite={
+		zIndex:100,
+		gravityX:0,
+		gravityY:0,
+		speedX:0,
+		speedY:0,
+		speedLimitX:8,
+		speedLimitY:8,
+		restitutionX:0,
+		restitutionY:0,
+		invulnerabilityTimer:0,
+		edgeUpDown:[-1,-1],
+		edgeLeftRight:[-1,-1]
+	}
+
+	if (!G) G={};
+	if (!G.onLogic) G.onLogic=noop;
+	if (!G.onGameLogic) G.onGameLogic=noop;
+	if (!G.onCollision) G.onCollision=noop;
+	if (!G.onDead) G.onDead=noop;
+	if (!G.onDraw) G.onDraw=noop;
+	if (!G.onDrawBackground) G.onDrawBackground=noop;
+	if (!G.areaX) G.areaX=0;
+	if (!G.areaY) G.areaY=0;
+	if (!G.maxSprites) G.maxSprites=10000;
+	if (!G.maxForceSprites) G.maxForceSprites=20000;
+
+	var area={x:G.areaX,y:G.areaY,width:G.areaWidth,height:G.areaHeight,alive:1};
+
+	function handleSpeed(sprite,size,coord,speed,touchSides,allcollisions) {
+		var collided=false;
+		if (sprite[speed]) {
+			var otherdelta,delta=sprite[speed]>0?sprite[size]-1:0;
+			var side=sprite[coord]+delta;
+			sprite[coord]+=sprite[speed];
+			var collisions=arcade.getCollision(sprite,"walls",allcollisions);
+			for (var j in collisions) {
+				collided=true;
+				otherdelta=sprite[speed]<0?collisions[j][size]-1:0;
+				if (sprite[speed]>0) {
+					side=Math.min(side,collisions[j][coord]+otherdelta);
+					sprite[touchSides][1]=1;
+				} else {
+					side=Math.max(side,collisions[j][coord]+otherdelta);
+					sprite[touchSides][0]=1;
+				}
+			}
+			if (collided) sprite[coord]=side-delta;
+		}
+		return collided;
+	}
+
+	function handleEdge(sprite,size,edges,coord,touchSides,limitleft,limitright,speed) {
+		var ret=false;
+		switch (sprite[edges][0]) {
+			case 0: {
+				if (sprite[coord]<limitleft) { sprite[coord]=limitleft; sprite[touchSides][0]=1; ret=true;}
+				break;
+			}
+			case 1: {
+				if (sprite[coord]<=limitleft-sprite[size]) sprite[coord]=limitright-1;
+				break;
+			}
+		}
+		switch (sprite[edges][1]) {
+			case 0: {
+				if (sprite[coord]+sprite[size]>=limitright) { sprite[coord]=limitright-sprite[size]; sprite[touchSides][1]=1;ret=true;}
+				break;
+			}
+			case 1: {
+				if (sprite[coord]>=limitright) sprite[coord]=limitleft-sprite[size]+1;
+				break;
+			}
+		}
+		return ret;
+	}
+
+	function limit(val,min,max) { return val<min?min:val>max?max:val; };
+
+	arcade={
+		spritesIndex:[],
+		sprites:[],
+		runSprites:function() {
+			var sprite,allCollisions,alive=[];
+			var spritesToProcess=this.sprites.length;
+
+			G.onGameLogic();
+
+			for (var i=0;i<spritesToProcess;i++) {
+				allCollisions={};
+				sprite=this.sprites[i];
+
+
+				if (sprite.alive&&!sprite.disabled) {
+					G.onLogic(sprite);
+					sprite.touchVertical=[];
+					sprite.touchHorizontal=[];
+					sprite.speedX=limit(sprite.speedX+sprite.gravityX,-sprite.speedLimitX,sprite.speedLimitX);
+					sprite.speedY=limit(sprite.speedY+sprite.gravityY,-sprite.speedLimitY,sprite.speedLimitY);
+					var wallx=handleSpeed(sprite,"width","x","speedX","touchHorizontal",allCollisions);
+					var wally=handleSpeed(sprite,"height","y","speedY","touchVertical",allCollisions);
+					wallx|=handleEdge(sprite,"width","edgeLeftRight","x","touchHorizontal",0,area.width,"speedX");
+					wally|=handleEdge(sprite,"height","edgeUpDown","y","touchVertical",0,area.height,"speedY");
+					if (wallx) sprite.speedX*=-sprite.restitutionX;
+					if (wally) sprite.speedY*=-sprite.restitutionY;
+					
+					this.getCollision(sprite,"hits",allCollisions);
+					for (var j in allCollisions)
+						G.onCollision(sprite,allCollisions[j]);
+				}					
+			}
+
+			spritesIndex={};
+
+			for (var i=0;i<this.sprites.length;i++)
+				if (this.sprites[i].alive) {	
+					if (!spritesIndex[this.sprites[i].element]) spritesIndex[this.sprites[i].element]=[];
+					spritesIndex[this.sprites[i].element].push(this.sprites[i]);
+					alive.push(this.sprites[i]);
+				} else G.onDead(this.sprites[i]);
+
+			this.sprites=alive;
+		},
+		renderSprites:function() {
+			var sprite;
+			G.onDrawBackground(area.x,area.y,area.width,area.height);
+			if (resortZindex) {
+				this.sprites.sort(zIndexSorter);
+				resortZindex=false;
+			}
+			for (var i=0;i<this.sprites.length;i++) {
+				sprite=this.sprites[i];
+				if (!(sprite.invulnerabilityTimer%2)&&(!sprite.alwaysRun||this.collidesWith(sprite,area)))
+					G.onDraw(sprite,area.x+sprite.x,area.y+sprite.y,sprite.width,sprite.height);
+			}
+		},		
+		addSprite:function(data,x,y,force) {
+			if (
+				(!force&&(this.sprites.length<G.maxSprites))||
+				(force&&(this.sprites.length<G.maxForceSprites))
+			) {
+				resortZindex=true;
+				var out={};
+				for (var a in basicSprite) out[a]=basicSprite[a];
+				for (var a in data) out[a]=data[a];
+				out.touchHorizontal=[];
+				out.touchVertical=[];
+				out.x=x;
+				out.y=y;
+				out.alive=1;
+				this.sprites.push(out);				
+				return out;
+			}
+		},
+		getElements:function(elm) {
+			var sub=[];
+			for (var i=0;i<this.sprites.length;i++)
+				if (this.sprites[i].alive&&(this.sprites[i].element==elm))
+					sub.push(this.sprites[i]);
+			return sub;
+		},
+		calculateAngle:function(sprite1,sprite2) {
+			var dx = sprite2.x+(sprite2.width/2)-sprite1.x-(sprite1.width/2), dy = sprite1.y+(sprite1.height/2)-sprite2.y-(sprite2.height/2);
+			var ang = (Math.atan2(dx, dy) * 180 / Math.PI);
+			if (ang < 0) ang = 360 + ang;
+			return ang;
+		},
+		calculateDistance:function(sprite1,sprite2) {
+			return Math.hypot(sprite2.x+(sprite2.width/2)-sprite1.x-(sprite1.width/2),sprite2.y+(sprite2.height/2)-sprite1.y-(sprite1.height/2));
+		},
+		calculateVector:function(angle,length) {
+			angle*=DEGTORAD;
+			return {
+				x:angle == 180 ? 0 : length * Math.sin(angle),
+				y:angle == 270 ? 0 : -length * Math.cos(angle)
+			}
+		},
+		applyVector:function(spr,angle,length) {
+			var vec=this.calculateVector(angle,length);
+			spr.speedX=vec.x;
+			spr.speedY=vec.y;
+		},
+		getNearest:function(sprite,elementid,distance) {
+			var distance,nearest,nearestDistance;
+			for (var i=0;i<this.sprites.length;i++)
+				if (this.sprites[i].alive&&(this.sprites[i].element==elementid)) {
+					distance=calculateDistance(sprite,this.sprites[i]);
+					if (!nearest||(distance<=nearestDistance)) {
+						nearest=this.sprites[i];
+						nearestDistance=distance;
+					}
+				}
+			return nearest;
+		},
+		collidesWith:function(sprite,sprite2) {
+			return sprite.alive&&sprite2.alive&&!(
+				(sprite.x>sprite2.x+sprite2.width-1)||
+				(sprite.x+sprite.width-1<sprite2.x)||
+				(sprite.y>sprite2.y+sprite2.height-1)||
+				(sprite.y+sprite.height-1<sprite2.y)
+			)
+		},
+		getCollision:function(sprite,type,all) {
+			var sprite2,out={};
+			if (sprite.alive&&sprite[type]&&sprite[type].length)
+				for (var j=0;j<this.sprites.length;j++) {
+					sprite2=this.sprites[j];
+					if (
+						sprite2.alive&&
+						(sprite2.element!=sprite.element)&&
+						(sprite[type].indexOf(sprite2.element)!=-1)&&
+						this.collidesWith(sprite,sprite2)
+					) {
+						out[j]=sprite2;
+						if (all) all[j]=sprite2;
+					}
+				}
+			return out;
+		}
+	}
+	return arcade;
+};
+
+// --- Audio system
+var Audio=function(mute) {
+	var audioContext=audioOut=0;
+	if (window.AudioContext)
+		audioContext=new window.AudioContext();
+	else if (window.webkitAudioContext)
+		audioContext=new window.webkitAudioContext();
+	if (audioContext) {
+		audioOut=audioContext.createGain();
+		audioOut.connect(audioContext.destination);
+		audioOut.gain.value=0.9;
+	}	
+	var _audio  = document.createElement("audio");
+	var CANPLAYMP3 = (typeof _audio.canPlayType === "function" &&  _audio.canPlayType("audio/mpeg;codecs=mp3") !== "");
+	var audio={
+		NOISEWAVES:{
+		  whitenoise:function(v,i,p) { return Math.floor((i-1)/(p/2))!=Math.floor(i/(p/2))?Math.random()*2-1:v },
+		  square:function(v,i,p) { return ((Math.floor(i/(p/2))%-2)*-2)+1 },
+		  sine:function(v,i,p) { return Math.sin(i*6.28/p) },
+		  saw:function(v,i,p) { return ((v+1+(2/p)) % 2) - 1},
+		  triangle:function(v,i,p) { return Math.abs((i % p - (p/2))/p*4)-1 },
+		  tangent:function(v,i,p) { 
+		  	v= 0.15*Math.tan(i/p*3.14);
+		  	if (v<-1) v=-1;
+		  	if (v>1) v=1;
+		  	return v;
+		  },
+		  whistle:function(v,i,p) { return 0.75 * Math.sin(i/p*6.28) + 0.25 * Math.sin(40 *3.14 * i/p) },
+		  breaker:function(v,i,p) {
+		  	v=(i/p) + 0.8660;
+		    v=v - Math.floor(v);
+		    return -1 + 2 * Math.abs(1 - v*v*2);
+		  }
+		},
+		NOISETIMES:["attack","sustain","decay","release"],
+		NOISEDEFAULTS:{
+		  bitCrush:0, // 1-16
+		  bitCrushSweep:0, // -16 16
+		  attack:0, // 0-0.3
+		  sustain:0, // 0-0.4
+		  limit:0.6, // .2-.6
+		  decay:0.1, // 0-0.3
+		  release:0, // 0-0.4
+		  frequency:850, // 100-1600
+		  tremoloFrequency:0, // 0-50
+		  tremoloDepth:0, // 0-1
+		  frequencyJump1onset:0, // 0-1
+		  frequencyJump1amount:0, // -1-1
+		  frequencyJump2onset:0, // 0-1
+		  frequencyJump2amount:0, // -1-1
+		  pitch:0 // 0-.002
+		},
+		soundVolume:0.5,
+		musicVolume:0.9,
+		enabled:1,
+		audioSamples:{},
+		audioPlaying:{},
+		audioContext:audioContext,
+		musicPlaying:0,
+		audioLoading:0,
+		setMute:function(mute) {
+			if (mute) {
+				this.stopMusic();
+				this.enabled=0;				
+			} else
+				this.enabled=1;				
+		},
+		resume:function() { audioContext.resume(); },
+		addSample:function(id,data) { this.audioSamples[id]=data; },
+		loadAudio:function(list) {
+			if (list.length) {
+				this.audioLoading=true;
+				var self=this;
+				var item=list.splice(0,1)[0];
+				var request = new XMLHttpRequest();
+				request.open('GET', item.file+(CANPLAYMP3?".mp3":".ogg"), true);
+				request.responseType = 'arraybuffer';
+				request.onload = function() {					
+					audioContext.decodeAudioData(request.response, function(buffer) {
+						self.addSample(item.id,buffer);
+						self.loadAudio(list);
+					}, function(e){
+						console.warn("Audio error with "+item.file,e);
+						self.loadAudio(list);
+					});
+				}	
+				request.send();
+			} else this.audioLoading=false;
+		},
+		play:function(id,loop,volume) {
+			if (this.enabled&&audioContext&&id&&this.audioSamples[id]) {
+				this.stop(id);
+				var gain=audioContext.createGain();					
+				gain.connect(audioOut);
+				gain.gain.value=volume||this.soundVolume;
+				var source = audioContext.createBufferSource();
+				source.buffer = this.audioSamples[id];
+			  	source.loop=!!loop;
+				source.connect(gain);
+				source.start(0);
+				this.audioPlaying[id]={gain:gain,source:source};
+			}
+		},
+		playMusic:function(id) {
+			if (id!=this.musicPlaying) {
+				this.stopMusic();
+				this.play(id,true,this.musicVolume);
+				this.musicPlaying=id;
+			}
+		},
+		stopMusic:function() {
+			this.stop(this.musicPlaying)
+			this.musicPlaying=0;
+		},
+		stop:function(id) {
+			if (this.audioPlaying[id]) {
+				this.audioPlaying[id].source.stop(0);
+				this.audioPlaying[id].gain.disconnect();
+				this.audioPlaying[id].source.disconnect();
+				this.audioPlaying[id]=0;
+			}
+		},
+		stopAll:function() {
+			for (var id in this.audioPlaying) this.stop(id);
+		},		
+		addNoise:function(id,parms) {
+			if (audioContext) {
+				var sampleRate = audioContext.sampleRate,data={};
+				for (var a in this.NOISEDEFAULTS) data[a]=this.NOISEDEFAULTS[a];
+				for (var a in parms) if (parms[a]!==undefined) data[a]=parms[a];
+				for (var i=0;i<this.NOISETIMES.length;i++) data[this.NOISETIMES[i]]*=sampleRate;
+
+				var out,bits,steps,attackDecay=data.attack+data.decay,
+					attackSustain=attackDecay+data.sustain,
+					samplePitch = sampleRate/data.frequency,
+					sampleLength = attackSustain+data.release,	
+
+					tremolo = .9,
+					value = .9,
+					envelope = 0;    
+
+				var buffer = audioContext.createBuffer(2,sampleLength,sampleRate);
+
+				for(var i=0;i<2;i++) {
+					var channel = buffer.getChannelData(i),
+						jump1=sampleLength*data.frequencyJump1onset,
+					jump2=sampleLength*data.frequencyJump2onset;
+					for(var j=0; j<buffer.length; j++) {
+						// ADSR Generator
+						value = this.NOISEWAVES[data.wave](value,j,samplePitch);
+						if (j<=data.attack) envelope=j/data.attack;
+						else if (j<=attackDecay) envelope=-(j-attackDecay)/data.decay*(1-data.limit)+data.limit;
+						if (j>attackSustain) envelope=(-(j-attackSustain)/data.release+1)*data.limit;
+						// Tremolo
+						tremolo = this.NOISEWAVES.sine(value,j,sampleRate/data.tremoloFrequency)*data.tremoloDepth+(1-data.tremoloDepth);
+						out = value*tremolo*envelope*0.9;
+						// Bit crush
+						if (data.bitCrush||data.bitCrushSweep) {
+						    bits = Math.round(data.bitCrush + j / sampleLength * data.bitCrushSweep);
+						    if (bits<1) bits=1;
+						    if (bits>16) bits=16;
+						    steps=Math.pow(2,bits);
+						    out=-1 + 2 * Math.round((0.5 + 0.5 * out) * steps) / steps;
+						}
+						// Done!
+						if(out>1) out= 1;
+						if(out<-1) out = -1;
+						channel[j]=out;
+						// Frequency jump
+							if (j>=jump1) { samplePitch*=1-data.frequencyJump1amount; jump1=sampleLength }
+						if (j>=jump2) { samplePitch*=1-data.frequencyJump2amount; jump2=sampleLength }
+						// Pitch
+						samplePitch-= data.pitch;
+					}
+				}
+			} else return 0;
+			this.addSample(id,buffer);
+		}
+	}
+	audio.setMute(mute);
+	return audio;
+}
+
+// --- The actual game...
+var M3=(function(){
+
+	// --- CONSTANTS
+	var VERSION="1.0"
+	var _DEBUGGAME=0;
+	var _DEBUGTELEMETRY=false;
+	var _DEBUGNOMUSIC=false;
+	var _DEBUGLIVES=500;
+	var _DEBUGARCADETIME=25*60;
+	var _DEBUGCOUNTGOLD=false;
+	var _DEBUGNOINSTALL=false;
+
+	var AUDIO;
+	var MSPF=Math.floor(1000/25);
+	var HEARTSYMBOL=String.fromCharCode(773);
+	var DEGTORAD=3.14/180;
+	var TAPSIZE=3;
+	var M3MUSICS=3;
+	var ARCADEMUSICS=2;
+	var ISFIREFOX=navigator.userAgent.toLowerCase().indexOf("firefox") > -1;	
+	var PALETTE=[
+		[16,24,32,255],
+		[240,240,220,255],
+		[250,200,0,255],
+		[16,200,64,255],
+		[0,160,200,255],
+		[210,64,64,255],
+		[160,105,75,255],
+		[115,100,100,255]
+	];
+	var TITLEPALETTES=[
+		[5,2],
+		[3,4],
+		[0,7]
+	];
+	var FONT={
+		charWidth:8,
+		charHeight:12,
+		charsPerRow:64,
+		charsPerCol:12,
+		x:0,
+		y:138,
+		width:512,
+		height:144
+	};
+	var GRID={
+		x:8,
+		y:64,
+		marginRight:8,
+		marginBottom:8,
+		cols:10,
+		rows:10
+	};
+	var TILE={
+		dsize:64,
+		size:32,
+		hsize:16,
+		hhsize:8,
+		hhhsize:4,
+		hhhhsize:2
+	}
+	GRID.width=GRID.cols*TILE.size;
+	GRID.height=GRID.rows*TILE.size;
+	GRID.hheight=GRID.height/2;
+	GRID.hwidth=GRID.width/2;
+	GRID.cx=GRID.x+GRID.hwidth;
+	GRID.cy=GRID.y+GRID.hheight;
+	var GAUGESIZE=100;
+	var LIFEGAUGESIZE=TILE.size*2;
+	var LOADTIME=10;
+	var ALLTIME=25*60;
+	var STARTPUZZLETIME=ALLTIME;
+	var STARTARCADETIME=25*10;
+	var PANICTIME=25*5;
+	var RANKS=[
+		{
+			label:["Passable","Okay","Whatever"],
+			sound:"negate",
+			bonusTime:1,
+			bonusSalary:0,
+			description:"No bonus..."
+		},
+		{
+			label:["Good","Nice"],
+			sound:"smallblam",
+			bonusTime:1.2,
+			bonusSalary:1,
+			description:"Small time and salary bonus."
+		},
+		{
+			label:["Very Good!","Good job!","Well done!"],
+			sound:"extratime",
+			bonusTime:1.4,
+			bonusSalary:2,
+			description:"Good time and salary bonus!"
+		},
+		{
+			label:["Noteworthy!","Yeah!"],
+			sound:"coin",
+			bonusTime:1.6,
+			bonusSalary:4,
+			description:"A lot of bonus time and salary!"
+		},
+		{
+			label:["Outstanding!","Incredible!"],
+			sound:"extralife",
+			bonusTime:1.8,
+			bonusSalary:8,
+			description:"Huge time and salary bonus!"
+		},
+		{
+			label:[HEARTSYMBOL+" PERFECT "+HEARTSYMBOL],
+			sound:"extralife",
+			bonusTime:3,
+			bonusSalary:20,
+			description:"GREAT JOB HUMAN!"
+		}
+	];
+
+	// --- GAME STATE MACHINE
+
+	var STATES={
+		SPLASH:0,
+		LOADING:1,
+		TITLE:2,
+		TITLESCREEN:3,
+		INSTRUCTIONS:4,
+		NEWGAME:5,
+		NEWGRID:6,
+		STARTMATCH:7,
+		MATCH:8,
+		WAITFALL:9,
+		ENDMATCH:10,
+		CONVERTMATCH:11,
+		DEBRIEFMATCH:12,
+		ARCADERENDERING:13,
+		ARCADETITLE:14,
+		ARCADE:15,
+		ARCADEOVER:16,
+		EVALUATEARCADE:17,
+		DEBRIEFARCADE:18,
+		GAMEOVER:100
+	}
+
+	// --- INSTRUCTIONS
+
+	var INSTRUCTIONS=[
+		[
+			{font:"normal",color:3,text:HEARTSYMBOL+" STORY "+HEARTSYMBOL},
+			{space:1},
+			{animation:1},
+			{font:"small",color:1,text:"Earth, 2218. Casual gaming addiction"},
+			{font:"small",color:1,text:"is a chronical pathology in society"},
+			{font:"small",color:1,text:"and game design reached an endless stale"},
+			{font:"small",color:1,text:"point. People are playing the same few"},
+			{font:"small",color:1,text:"games forever and money is just a matter"},
+			{font:"small",color:1,text:"of time for gaming megacorporations."},
+			{space:1},
+			{paint:{x:404,y:283,width:80,height:97}},
+			{pad:1,font:"small",color:1,text:"You are a KesieV Corp."},
+			{pad:1,font:"small",color:1,text:"employee and your mission is"},
+			{pad:1,font:"small",color:1,text:"to become the richest game"},
+			{pad:1,font:"small",color:1,text:"designer ever, serving the"},
+			{pad:1,font:"small",color:1,text:"company by carefully crafting"},
+			{pad:1,font:"small",color:1,text:"more of the same over and"},
+			{pad:1,font:"small",color:1,text:"over again."},
+			{pad:1,font:"small",color:1,text:"Be creative, have fun but..."},
+			{space:1},
+			{font:"normal",color:1,text:"Follow company's"},
+			{font:"normal",color:2,text:"Tighty Deadline"},
+			{space:1}
+		],[
+			{font:"normal",color:3,text:HEARTSYMBOL+" GAME "+HEARTSYMBOL},
+			{space:1},
+			{font:"small",color:1,text:"You've to design and playtest new maps for"},
+			{font:"small",color:1,text:"games. Since you're facing addiction too,"},
+			{font:"small",color:1,text:"the map tool is a match-3 game. Sorry."},
+			{space:1},
+			{font:"normal",color:3,text:"DESIGN PHASE"},
+			{space:1},
+			{paint:{x:322,y:283,width:80,height:97}},
+			{pad:1,font:"small",color:5,text:String.fromCharCode(767)+" gives life for playtesting"},
+			{pad:1,font:"small",color:2,text:"$ gives life for playtesting"},
+			{pad:1,font:"small",color:6,text:String.fromCharCode(763)+" gives more playtest time"},
+			{pad:1,font:"small",color:4,text:String.fromCharCode(762)+" is a jolly, gives nothing"},
+			{pad:1,font:"small",color:7,text:String.fromCharCode(751)+" gives you nothing"},
+			{pad:1,font:"small",color:1,text:"Make sure you've at least one"},
+			{pad:1,font:"small",color:1,text:String.fromCharCode(762)+" and $ in map when time is"},
+			{pad:1,font:"small",color:1,text:"up. Go for time and lives!"},
+			{space:1},
+			{font:"small",color:1,text:String.fromCharCode(762)+" sets the gameplay so try to place"},
+			{font:"small",color:1,text:"and balance coins, enemies and blocks."},
+			{space:1},
+			{font:"normal",color:3,text:"PLAYTEST PHASE"},
+			{space:1},
+			{paint:{x:486,y:283,width:80,height:97}},
+			{pad:1,font:"small",color:1,text:"Design phase tiles are turned"},
+			{pad:1,font:"small",color:1,text:"into game elements and game"},
+			{pad:1,font:"small",color:1,text:"title and rules are displayed."},
+			{pad:1,font:"small",color:1,text:"Play your own stage and prove"},
+			{pad:1,font:"small",color:1,text:"that's playable and rewarding!"},
+			{pad:1,font:"small",color:1,text:"A good gameplay gives design"},
+			{pad:1,font:"small",color:1,text:"time and job benefits for"},
+			{pad:1,font:"small",color:1,text:"your next project."},
+		],[
+			{font:"normal",color:3,text:HEARTSYMBOL+" TIPS 1/2 "+HEARTSYMBOL},
+			{space:1},
+			{font:"small",color:1,text:"There are NO COMBOS in design phase"},
+			{font:"small",color:1,text:"match-3 game. You'll soon get why."},
+			{space:1},
+			{font:"small",color:2,text:HEARTSYMBOL},
+			{space:1},
+			{font:"small",color:1,text:"Brown blocks in design gives playtesting"},
+			{font:"small",color:1,text:"time, coins in playtesting gives design"},
+			{font:"small",color:1,text:"time. Learn how to balance them quickly."},
+			{space:1},
+			{font:"small",color:2,text:HEARTSYMBOL},
+			{space:1},
+			{font:"small",color:1,text:String.fromCharCode(762)+" spawns outside the top of the board"},
+			{font:"small",color:1,text:"when matched and when project starts so"},
+			{font:"small",color:1,text:"be quick and make it fall ASAP!"},
+			{space:1},
+			{font:"small",color:2,text:HEARTSYMBOL},
+			{space:1},
+			{font:"small",color:1,text:"Coin value depends on the number of"},
+			{font:"small",color:1,text:"enemies on the board, salary, lives,"},
+			{font:"small",color:1,text:"project number and game sequel. Be wise!"},
+			{space:1},
+			{font:"small",color:2,text:HEARTSYMBOL},
+			{space:1},
+			{font:"small",color:1,text:"Your boss is impressed by clean gameplays"},
+			{font:"small",color:1,text:"and hates unreachable bonuses... but he's"},
+			{font:"small",color:1,text:"often fair and knows what's doable."},
+			{space:1},
+			{font:"small",color:2,text:HEARTSYMBOL},
+			{space:1},
+			{font:"small",color:1,text:"Games are unlocked the first time you"},
+			{font:"small",color:1,text:"play them and will appear more often"},
+			{font:"small",color:1,text:"at start."},
+			{space:1},
+			{font:"small",color:2,text:HEARTSYMBOL},
+			{space:1},
+			
+		],[
+			{font:"normal",color:3,text:HEARTSYMBOL+" TIPS 2/2 "+HEARTSYMBOL},
+			{space:1},
+			{font:"small",color:1,text:"Design guidelines changes from game to"},
+			{font:"small",color:1,text:"game. Find your own and don't give up!"},
+			{space:1},
+			{font:"small",color:2,text:HEARTSYMBOL},
+			{space:1},
+			{font:"small",color:1,text:"Are you using a touchpad for playing?"},
+			{font:"small",color:1,text:"Try using spacebar for clicking!"},
+			{space:1},
+			{font:"small",color:2,text:HEARTSYMBOL},
+			{space:1},
+			{font:"small",color:1,text:"Your progress is automatically saved"},
+			{font:"small",color:1,text:"after design and playtesting phases."},
+			{space:1},
+			{font:"small",color:2,text:HEARTSYMBOL},
+			{space:1},
+			{font:"small",color:4,text:"This game works offline too, so you can"},
+			{font:"small",color:4,text:"add it to your bookmarks or - better - to"},
+			{font:"small",color:4,text:"your home screen!"},
+		],[
+			{font:"normal",color:3,text:HEARTSYMBOL+" CREDITS "+HEARTSYMBOL},
+			{space:1},
+			{font:"small",color:2,text:String.fromCharCode(767)+" Tighty Deadline "+String.fromCharCode(767)},
+			{font:"small",color:1,text:"A game by KesieV Norimaki"},
+			{font:"small",color:1,text:"https://www.kesiev.com"},
+			{space:1},
+			{font:"small",color:2,text:"Music"},
+			{font:"small",color:1,text:"David Thuren - Kinetix (BlastingPowerMix)"},
+			{font:"small",color:1,text:"Kent Hofling - Hollow"},
+			{font:"small",color:1,text:"Krystian Wyrwicz - Final Voice"},
+			{font:"small",color:1,text:"Alexander Semenov - Strolling Cats"},
+			{font:"small",color:1,text:"Andrzej Kucharski - Cool Musax"},
+			{space:1},
+			{font:"small",color:2,text:"Graphics made with"},
+			{font:"small",color:1,text:"GIMP"},
+			{space:1},
+			{font:"small",color:4,text:"This game is GPLv3 licensed."},
+			{font:"small",color:4,text:"https://github.com/kesiev/tightydeadline"},
+			{space:1},
+			{font:"normal",color:3,text:HEARTSYMBOL+" THANKS "+HEARTSYMBOL},
+			{space:1},
+			{font:"small",color:1,text:"Caroli - Bianca - JMarquis - Il Kusagari"},
+			{font:"small",color:1,text:"StairSoft - Gaia - Bruno - Todds - Adem"},
+			{space:1},
+			{font:"small",color:1,text:"Let me know your comments on Twitter!"},
+			{font:"small",color:4,text:"@kesiev"},
+		]
+	];
+
+	// --- OVERALL GAME
+
+	var mute,alreadyPlayed,gotoPlayAfterPage,unlocked,hiscore,completion;	
+
+	function calculateCompletion() {
+		var all=0;
+		completion=0;
+		for (var i=0;i<TILES.length;i++)
+			if (TILES[i].gamegenre) {
+				all++;
+				if (unlocked[TILES[i].gamegenre]) completion++;
+			}
+		completion=Math.floor(completion/all*100);
+	}
+
+	function loadGameData() {
+		if (localStorage._TD_unlocked)
+			unlocked=JSON.parse(localStorage._TD_unlocked);
+		else
+			unlocked={};
+		if (localStorage._TD_hiscore)
+			hiscore=localStorage._TD_hiscore*1;
+		else
+			hiscore=0;
+		alreadyPlayed=!!localStorage._TD_played;
+		mute=!!localStorage._TD_mute;
+		if (localStorage._TD_save) {
+			var data=JSON.parse(localStorage._TD_save);
+			pendingGameStatus=data.pendingGameStatus;
+			puzzleTime=data.puzzleTime;
+			arcadeTime=data.arcadeTime;
+			gold=data.gold;
+			lives=data.lives;
+			stages=data.stages;
+			chapters=data.chapters;
+			timeBonus=data.timeBonus;
+			allPointToLives=data.allPointToLives;
+			pointToLives=data.pointToLives;
+			level=data.level;
+			salary=data.salary;
+			map=data.map;
+			arcadeEarnings=data.arcadeEarnings;
+			arcadeGold=data.arcadeGold;
+			arcadeDeaths=data.arcadeDeaths;
+			arcadeAllGold=data.arcadeAllGold;
+		} else pendingGameStatus=0;
+		if (_DEBUGGAME) {
+			unlocked={};
+			unlocked[_DEBUGGAME]=1;
+		}
+	}
+
+	function saveGame(status) {
+		localStorage._TD_save=JSON.stringify({
+			pendingGameStatus:status,
+			puzzleTime:puzzleTime,
+			arcadeTime:arcadeTime,
+			gold:gold,
+			lives:lives,
+			stages:stages,
+			chapters:chapters,
+			timeBonus:timeBonus,
+			allPointToLives:allPointToLives,
+			pointToLives,pointToLives,
+			level:level,
+			salary:salary,
+			map:map,
+			arcadeEarnings:arcadeEarnings,
+			arcadeGold:arcadeGold,
+			arcadeDeaths:arcadeDeaths,
+			arcadeAllGold:arcadeAllGold
+		})
+	}
+
+	function endGame() {
+		delete localStorage._TD_save;
+		pendingGameStatus=0;
+	}
+
+	function setFirstPlay() {
+		if (!alreadyPlayed) {
+			alreadyPlayed=1;
+			localStorage._TD_played=1;
+		}
+	}
+
+	function setMute(tomute) {
+		mute=tomute;
+		if (mute) localStorage._TD_mute=1;
+		else delete localStorage._TD_mute;
+		AUDIO.setMute(mute);
+	}
+
+	function unlockGame(id) {
+		if (!unlocked[id]) {
+			unlocked[id]=1;
+			localStorage._TD_unlocked=JSON.stringify(unlocked);
+		}
+	}
+
+	function setHiScore(score) {
+		if (hiscore!=score) {
+			hiscore=score;
+			localStorage._TD_hiscore=score;
+		}
+	}
+
+	// --- MATCH-3 GAMEPLAY RULES
+
+	var timeBonus;
+
+	var TILES=[
+		{element:"hole",color:0},
+		{explosion:1,sprite:"foe",gives:"points",spriteX:35,spriteY:35},
+		{explosion:1,sprite:"gold",gives:"points",spriteX:69,spriteY:35},
+		{explosion:1,sprite:"block",gives:"time",spriteX:1,spriteY:35},
+		{explosion:1,sprite:"empty",element:"empty",spriteX:103,spriteY:35},
+
+		{sprite:"player",spriteX:1,spriteY:1,player:true,gamegenre:"quicklydash",contentX:487,contentY:121},
+		{sprite:"player",spriteX:1,spriteY:1,player:true,gamegenre:"avoidyjetpack",contentX:415,contentY:121},
+		{sprite:"player",spriteX:1,spriteY:1,player:true,gamegenre:"dodgyship",contentX:451,contentY:121},
+		{sprite:"player",spriteX:1,spriteY:1,player:true,gamegenre:"flickyfrog",contentX:397,contentY:121},
+		{sprite:"player",spriteX:1,spriteY:1,player:true,gamegenre:"catchydrill",contentX:361,contentY:121},
+		{sprite:"player",spriteX:1,spriteY:1,player:true,gamegenre:"floatybounce",contentX:325,contentY:121},
+		{sprite:"player",spriteX:1,spriteY:1,player:true,gamegenre:"scrollyhero",contentX:307,contentY:121},
+		{sprite:"player",spriteX:1,spriteY:1,player:true,gamegenre:"brainytap",contentX:217,contentY:121},
+		{sprite:"player",spriteX:1,spriteY:1,player:true,gamegenre:"slideyninja",contentX:19,contentY:121},
+		{sprite:"player",spriteX:1,spriteY:1,player:true,gamegenre:"breakyball",contentX:253,contentY:121},
+		{sprite:"player",spriteX:1,spriteY:1,player:true,gamegenre:"flickyball",contentX:199,contentY:121},
+		{sprite:"player",spriteX:1,spriteY:1,player:true,gamegenre:"golfybomb",contentX:271,contentY:121},
+		{sprite:"player",spriteX:1,spriteY:1,player:true,gamegenre:"zippyboat",contentX:235,contentY:121},
+		{sprite:"player",spriteX:1,spriteY:1,player:true,gamegenre:"jumpyrocket",contentX:127,contentY:121},
+		{sprite:"player",spriteX:1,spriteY:1,player:true,gamegenre:"throwyshoot",contentX:289,contentY:121},
+	];
+	var GAMESPERROUND=2;
+	var LEVELSPERGAME=2;
+	var LEVELSPERENDROUND=2;
+	var LEVELSPERSEGMENT=(GAMESPERROUND*LEVELSPERGAME)+LEVELSPERENDROUND;
+	var CHAPTERS=[
+		[""],
+		["II","AGAIN","THE SEQUEL","2"],
+		["III","THE THIRD","STRIKES AGAIN","3"],
+		["IV","THE FOURTH","TURBO EDITION","4"],
+		["V","VICTORY","THE FIFTH","ANNIVERSARY EDITION","5"],
+		["VI","THE SIXTH","6","ULTRA COLLECTION","PREMIUM DELUXE","EX-PLUS ALPHA"],
+		["VII","THE SEVENTH","7","REMASTERED","RE-CORE","THE PRESEQUEL","FINAL VERSION"],
+		["VIII","EIGHT","8","INFINITY","FOREVER","ENDLESS","TRUE ENDING"]
+	];
+
+	// --- ARCADE GAME GENRES
+
+	var arcadeDeaths,arcadeEarnings,arcadeAllGold=0,arcadeGold,salary;
+
+	var GAMEGENRES={
+		quicklydash:{
+			title:"Quickly Dash",
+			instructions:[
+				"DASH THRU THE WALLS!",
+				"TAP TO JUMP",
+				"TAP TO START"
+			],
+			startGesture:"tap",
+			addSprite:function(sprite,x,y,tx,ty) {
+				var spr;
+				for (var q=1;q<19;q++) {
+					spr=arcade.addSprite(sprite,(q*GRID.width)+x,y);
+					spr.afterTime=Math.floor((spr.x-TILE.size*2)/4);
+					spr.onTime={set:{countGold:spr.element=="gold",hits:sprite.thenHits,onOffScreen:{remove:1}}}
+				}
+			},
+			finalizeStage:function() {
+				arcade.addSprite(this.playerElement,TILE.size+TILE.hhsize,GRID.hheight-TILE.hhsize);					
+			},	
+			background:[{
+				color:[5],
+				scrollx:[-1],
+				scrolly:[0],
+				map:[
+					[[1,2],[2,1],[1,2],[2,1],[10,10]],
+					[[3,4],[3,4],[3,4],[3,4],[10,10]],
+					[[8,1,2],[8,2,1],[8,1,2],[8,2,1],[10,10,10]]
+				]
+			}],
+			foe:{
+				element:"foe",spriteX:91,spriteY:121,width:TILE.hsize,height:TILE.hsize,onHit:{loseLife:1,remove:1,explode:1,other:{hit:1}},
+				speedX:-4
+			},
+			gold:{
+				element:"gold",spriteX:1,spriteY:103,animationFrames:6,animationSpeed:2,width:TILE.hsize,height:TILE.hsize,
+				onHit:{kill:1,earnGold:1},
+				speedX:-4
+			},
+			block:{
+				element:"block",spriteX:477,spriteY:69,width:TILE.size,height:TILE.size,onHits:{playAudio:"dash",kill:1},
+				thenHits:["player"],
+				speedX:-4
+			},
+			playerElement:{
+				zIndex:2000,
+				hits:["gold","foe"],
+				invulnerabilityTime:25,
+				movement:"tapjump",
+				spriteX:469,
+				spriteY:121,
+				animationFrames:2,
+				animationSpeed:2,
+				jumpSpeed:-10,
+				onJump:{playAudio:"beep"},
+				gravityY:0.3,
+				isPlayer:1,				
+				edgeUpDown:[0,0],
+				element:"player",
+				engineEffect:"engine",
+				engineSpeedX:-4,
+				engineSpeedY:0,				
+				width:TILE.hsize,height:TILE.hsize,startMode:"tap",walls:["block"],restitutionX:0,restitutionY:0			
+			}
+		},
+		dodgyship:{
+			title:"Dodgy Ship",
+			instructions:[
+				"GET COINS, AVOID BULLETS!",
+				"DRAG THE SHIP UP/DOWN",
+				"TAP TO START"
+			],
+			startGesture:"tap",
+			addSprite:function(sprite,x,y,tx,ty) {
+				var spr;
+				for (var q=1;q<10;q++) {
+					spr=arcade.addSprite(sprite,(q*GRID.width)+x,y);
+					spr.afterTime=Math.floor((spr.x-GRID.width+TILE.size)/2);
+					spr.onTime={set:{afterTime:0,onTime:sprite.keepDoing,hits:sprite.thenHits,onOffScreen:{remove:1}}}
+				}
+			},
+			finalizeStage:function() {
+				arcade.addSprite(this.playerElement,TILE.size+TILE.hhsize,(GRID.height-TILE.size)/2);					
+			},	
+			background:[{
+				color:[0],
+				scrollx:[-1],
+				scrolly:[0],
+				map:[
+					[[1,2],[2,1]],
+					[[3,0,4]]
+				]
+			},{
+				color:[4],
+				scrollx:[-1],
+				scrolly:[0],
+				map:[
+					[[0,0,5],[0,0,0],[0,5,0],[0,0,0],[7,7,7]]
+				]
+			}],
+			foe:{
+				element:"foe",spriteX:91,spriteY:121,width:TILE.hsize,height:TILE.hsize,onHit:{loseLife:1,kill:1,explode:1,other:{hit:1}},
+				speedX:-2,
+				keepDoing:{spawn:[
+					{sprite:"enemyBullet"},
+					{sprite:"enemyBullet",set:{speedY:-1}},
+					{sprite:"enemyBullet",set:{speedY:1}}
+				],set:{afterTime:50}}
+			},
+			gold:{
+				element:"gold",spriteX:1,spriteY:103,animationFrames:6,animationSpeed:2,width:TILE.hsize,height:TILE.hsize,
+				onHit:{kill:1,earnGold:1},
+				keepDoing:{set:{afterTime:Math.floor((GRID.width-TILE.size*3)/2),onTime:{set:{countGold:1}}}},
+				speedX:-2
+			},
+			block:{
+				element:"block",spriteX:239,spriteY:69,width:TILE.size,height:TILE.size,onHits:{explode:1,kill:1,other:{set:{stun:10}}},
+				thenHits:["player"],
+				speedX:-2
+			},
+			enemyBullet:{
+				onHit:{loseLife:1,remove:1,explode:1,other:{hit:1}},
+				zIndex:2500,
+				speedX:-4,
+				element:"foe",
+				spriteX:343,spriteY:103,
+				width:TILE.hhsize,height:TILE.hhsize,
+				angle:0,
+				spin:20,
+				animationSpeed:2,
+				animationFrames:2,
+				onOffScreen:{remove:1}
+			},
+			playerElement:{
+				zIndex:2000,
+				hits:["gold","foe"],
+				invulnerabilityTime:25,
+				dragSpeed:8,
+
+				engineSpeedX:-2,
+				engineSpeedY:0,
+
+				movement:"dragupdown",
+				spriteX:451,
+				spriteY:121,
+
+				isPlayer:1,				
+				edgeUpDown:[0,0],
+				element:"player",				
+				width:TILE.hsize,height:TILE.hsize,startMode:"tap",walls:["block"],restitutionX:0,restitutionY:0
+			}		
+		},
+		flickyfrog:{
+			title:"Flicky Frog",
+			instructions:[
+				"DON'T FALL IN WATER!",
+				"FLICK UP/DOWN/LEFT/RIGHT TO MOVE",
+				"TAP TO START"
+			],
+			startGesture:"tap",			
+			addSprite:function(sprite,x,y,tx,ty) {
+				var spr=arcade.addSprite(sprite,x,y);
+				if (sprite.onBlock) arcade.addSprite(this.block,tx*TILE.size,ty*TILE.size);
+				if (sprite.element=="foe") spr.onTime={set:this.foeDown};				
+				if (sprite.gapY) spr.y+=spr.gapY;
+				if (sprite.element=="player") {
+					this.spawners[0].x=spr.x;
+					this.spawners[0].y=spr.y;
+				}
+			},
+			spawners:[
+				{
+					element:"player"
+				}
+			],
+			finalizeStage:function() {
+				this.foeUp.onTime={set:this.foeDown};
+				this.foeDown.onTime={set:this.foeUp};
+			},
+			background:[{
+				color:[4],
+				scrollx:[0],
+				scrolly:[0],
+				map:[[[12]]]
+			}],
+			foeUp:{spriteX:341,spriteY:1,afterTime:25,onHit:{explode:1,loseLife:1,other:{remove:1}}},
+			foeDown:{spriteX:307,spriteY:1,afterTime:25,onHit:0},
+			foe:{
+				element:"foe",spriteX:341,spriteY:1,width:TILE.size,height:TILE.size,afterTime:25,
+			},
+			empty:{
+				hidden:1,
+				element:"empty",spriteX:103,spriteY:69,width:TILE.size,height:TILE.size,afterTime:25,onHit:{explode:1,loseLife:1,other:{remove:1}}
+			},
+			gold:{countGold:1,gapY:-7,onBlock:1,element:"gold",spriteX:1,spriteY:103,animationFrames:6,animationSpeed:2,width:TILE.hsize,height:TILE.hsize,onHit:{earnGold:1,kill:1}},
+			block:{element:"block",spriteX:307,spriteY:1,width:TILE.size,height:TILE.size,zIndex:10},
+			player:{
+				gapY:-7,
+				onBlock:1,
+				zIndex:2000,
+				hits:["gold","foe","empty"],
+				invulnerabilityTime:25,
+
+				movement:"moveflick",
+				animation:"frog",
+				onJump:{playAudio:"beep"},
+				flickLength:TILE.size,
+				spriteX:397,
+				spriteY:121,
+
+				isPlayer:1,				
+				edgeLeftRight:[0,0],edgeUpDown:[0,0],
+				element:"player",				
+				width:TILE.hsize,height:TILE.hsize,startMode:"tap",restitutionX:1,restitutionY:1
+			}
+		},
+		avoidyjetpack:{
+			title:"Avoidy Jetpack",
+			instructions:[
+				"FLY AND GET COINS!",
+				"HOLD DOWN TO FLY",
+				"TAP TO START"
+			],
+			startGesture:"tap",
+			addSprite:function(sprite,x,y,tx,ty) {
+				var spr;
+				for (var q=1;q<14;q++) {
+					spr=arcade.addSprite(sprite,(q*GRID.width)+x,y);
+					spr.afterTime=Math.floor((spr.x-TILE.dsize)/3);
+					spr.onTime={set:{countGold:spr.element=="gold",hits:sprite.thenHits,onOffScreen:{remove:1}}}
+				}
+			},
+			finalizeStage:function() {
+				arcade.addSprite(this.playerElement,TILE.size+TILE.hhsize,GRID.hheight-TILE.hhsize);					
+			},	
+			background:[{
+				color:[0],
+				scrollx:[-1],
+				scrolly:[0],
+				map:[
+					[[1,2],[2,1]],
+					[[1,2,1,2,1,2],[2,1,2,1,2,1],[1,2,1,2,1,2],[2,1,2,1,2,1],[6,7,7,6,6,7]]
+				]
+			},{
+				color:[4],
+				scrollx:[-1],
+				scrolly:[0],
+				map:[
+					[[5,0,0,0,0,0],[0,0,5,0,0,0],[0,5,0,5,0,5],[7,7,7,7,7,7],[10,10,10,10,10,10]]
+				]
+			}],
+			foe:{
+				element:"foe",spriteX:91,spriteY:121,width:TILE.hsize,height:TILE.hsize,onHit:{loseLife:1,remove:1,explode:1,other:{hit:1}},
+				speedX:-3
+			},
+			gold:{
+				element:"gold",spriteX:1,spriteY:103,animationFrames:6,animationSpeed:2,width:TILE.hsize,height:TILE.hsize,
+				onHit:{kill:1,earnGold:1},
+				speedX:-3
+			},
+			block:{
+				element:"block",spriteX:307,spriteY:69,width:TILE.size,height:TILE.size,onHits:{explode:1,kill:1,other:{set:{stun:10}}},
+				thenHits:["player"],
+				speedX:-3
+			},
+			playerElement:{
+				zIndex:2000,
+				hits:["gold","foe"],
+				invulnerabilityTime:25,
+
+				engineSpeedX:-2,
+				engineSpeedY:0,
+
+				movement:"jetpack",
+				animation:"jetpack",
+				spriteX:415,
+				spriteY:121,
+				onJump:{playAudio:"slide"},
+
+				gravityY:1,
+				jetpackForce:-2,
+
+				isPlayer:1,				
+				edgeUpDown:[0,0],
+				element:"player",				
+				width:TILE.hsize,height:TILE.hsize,startMode:"tap",walls:["block"],restitutionX:0,restitutionY:0
+			}
+		},
+		scrollyhero:{
+			title:"Scrolly Hero",
+			instructions:[
+				"TAP THE COINS",
+				"ON THE CLEAR PART!",
+				"TAP TO START"
+			],
+			startGesture:"tap",
+			addSprite:function(sprite,x,y,tx,ty) {
+				var spr,row;
+				for (var q=0;q<18;q++){
+					row=(ty+(q*GRID.rows));
+					spr=arcade.addSprite(sprite,x,-TILE.size);
+					spr.afterTime=8*row+Math.floor(Math.sin(row)*4);
+					spr.onTime={
+						set:{							
+							speedY:8,onOffScreen:{remove:1},
+							afterTime:26,
+							onTime:{								
+								set:{countGold:spr.element=="gold",onTap:sprite.onRightTap}
+							}
+						},
+					}
+				}
+			},
+			finalizeStage:function() {
+				arcade.addSprite(this.dimmer,0,0);					
+			},
+			background:[{
+				color:[4,6],
+				scrollx:[0],
+				scrolly:[0],
+				map:[
+					[[8]]
+				]
+			}],
+			dimmer:{
+				zIndex:3000,
+				spriteX:0,
+				spriteY:283,
+				width:GRID.width,
+				height:GRID.height-(TILE.size*3)
+			},
+			foe:{
+				element:"block",spriteX:205,spriteY:1,width:TILE.size,height:TILE.size,
+				onRightTap:{explode:1,loseLife:1,remove:1}
+			},
+			gold:{
+				element:"gold",spriteX:239,spriteY:1,width:TILE.size,height:TILE.size,
+				onRightTap:{earnGold:1,explode:1,remove:1,spawn:[{sprite:"coin"}]}
+			},
+			block:{
+				element:"foe",spriteX:273,spriteY:1,width:TILE.size,height:TILE.size,
+				onRightTap:{explode:1,remove:1}
+			},
+			coin:{
+				zIndex:2000,
+				element:"hud",spriteX:1,spriteY:103,animationFrames:6,animationSpeed:2,width:TILE.hsize,height:TILE.hsize,
+				invulnerabilityTimer:25,onAfterInvulnerability:{remove:1},speedY:-1
+			}
+		},
+		floatybounce:{
+			title:"Floaty Bounce",
+			instructions:[
+				"BOUNCE AND COLLECT COINS!",
+				"TAP TO FLY",
+				"TAP TO START"
+			],
+			startGesture:"tap",
+			addSprite:function(sprite,x,y,tx,ty) {
+				var spr,side=tx%2,center=(TILE.size-sprite.width)/2;
+				for (var q=0;q<4;q++) {
+					spr=arcade.addSprite(sprite,side?-sprite.width-center:GRID.width+center,y);
+					spr.atPhase=tx+(q*GRID.cols);						
+					spr.onPhase={
+						set:{
+							speedX:side?8:-8,
+							afterTime:4,
+							onTime:{
+								set:{
+									countGold:spr.element=="gold",
+									speedX:0,
+									atPhase:spr.atPhase+1,
+									onPhase:{
+										set:{
+											speedX:side?-8:8,
+											onOffScreen:{remove:1}
+										}
+									}
+								}
+							}
+						}
+					};	
+				}
+			},
+			finalizeStage:function() {
+				arcade.addSprite(this.playerElement,TILE.size*2,(GRID.height-this.playerElement.height)/2);					
+			},
+			background:[{
+				color:[4],
+				scrollx:[0],
+				scrolly:[0],
+				map:[
+					[
+						[0,0,0,5,0],
+						[5,0,0,0,0],
+						[0,0,5,0,5],
+						[0,0,0,0,0],
+						[6,7,7,6,6]
+					]
+				]
+			},{
+				color:[0],
+				scrollx:[0],
+				scrolly:[0],
+				map:[
+					[
+						[0,0,0,1,0],
+						[1,0,0,0,0],
+						[0,0,2,0,1],
+						[0,0,0,0,0],
+						[6,7,7,6,6]
+					]
+				]
+			}],
+			foe:{
+				element:"foe",spriteX:91,spriteY:121,width:TILE.hsize,height:TILE.hsize,
+				onHit:{loseLife:1,kill:1,explode:1,other:{hit:1}}
+			},
+			gold:{
+				element:"gold",spriteX:1,spriteY:103,animationFrames:6,animationSpeed:2,width:TILE.hsize,height:TILE.hsize,
+				onHit:{kill:1,earnGold:1}
+			},
+			block:{
+				element:"block",spriteX:273,spriteY:69,width:TILE.size,height:TILE.size
+			},
+			playerElement:{
+				walls:["block"],
+				hits:["foe","gold"],
+				onBump:{playAudio:"bump"},
+				invulnerabilityTime:25,
+				edgeUpDown:[0,0],
+				edgeLeftRight:[0,0],
+				restitutionX:1,
+				speedX:6,
+				onJump:{playAudio:"beep"},
+
+				movement:"flappy",
+				animation:"flappy",
+				spriteX:325,
+				spriteY:121,
+				animationFrames:2,
+				animationSpeed:4,
+
+				gravityY:1,
+				jumpSpeed:-8,
+
+				isPlayer:1,				
+				element:"player",				
+				width:TILE.hsize,height:TILE.hsize,startMode:"tap"
+			}
+		},
+		catchydrill:{
+			title:"Catchy Drill",
+			instructions:[
+				"GET THE COINS, AVOID THE REST!",
+				"DRAG THE DRILL LEFT/RIGHT",
+				"TAP TO START"
+			],
+			startGesture:"tap",
+			addSprite:function(sprite,x,y,tx,ty) {
+				var speedY;
+				for (var q=0;q<13;q++) {
+					speedY=random(3,6);
+					spr=arcade.addSprite(sprite,x,-sprite.height);
+					spr.zIndex=spr.isHidden?500:1000+random(0,500);
+					spr.afterTime=(q*125)+random(0,125);
+					spr.onTime={set:{afterTime:Math.floor((GRID.height-TILE.dsize)/speedY),onTime:{set:{countGold:spr.element=="gold",onOffScreen:{remove:1,log:"!"}}},speedY:speedY}};	
+				}
+			},
+			finalizeStage:function() {
+				arcade.addSprite(this.playerElement,(GRID.width-this.playerElement.width)/2,GRID.height-TILE.size);					
+			},
+			background:[{
+				color:[0],
+				scrollx:[0],
+				scrolly:[1],
+				map:[
+					[[3,1,2,1,4]]
+				]
+			}],
+			foe:{
+				isHidden:1,element:"foe",spriteX:91,spriteY:121,width:TILE.hsize,height:TILE.hsize,
+				onHit:{loseLife:1,kill:1,explode:1,other:{hit:1}}
+			},
+			gold:{
+				isHidden:1,element:"gold",spriteX:1,spriteY:103,animationFrames:6,animationSpeed:2,width:TILE.hsize,height:TILE.hsize,
+				onHit:{kill:1,earnGold:1}
+			},
+			block:{
+				element:"block",spriteX:205,spriteY:69,width:TILE.size,height:TILE.size,onHit:{explode:1,kill:1,other:{set:{stun:10}}}
+			},
+			playerElement:{
+				zIndex:2000,
+				engineEffect:"smokeup",
+				engineSpeedX:0,
+				engineSpeedY:10,
+				
+				movement:"dragleftright",
+				hits:["foe","gold","block"],
+				invulnerabilityTime:25,
+				dragSpeed:8,
+				spriteX:361,
+				animationSpeed:1,
+				animationFrames:2,
+				spriteY:121,				
+				isPlayer:1,				
+				edgeLeftRight:[0,0],
+				element:"player",				
+				width:TILE.hsize,height:TILE.hsize,startMode:"tap"
+			}
+		},
+		throwyshoot:{
+			title:"Throwy Shoot",
+			instructions:[
+				"TAP COINS, NOT BOMBS!",
+				"TAP TO START"
+			],
+			startGesture:"tap",			
+			addSprite:function(sprite,x,y,tx,ty) {
+				var spr,seq,side=tx<GRID.cols/2;
+				for (var q=0;q<3;q++) {
+					seq=(GRID.cols*GRID.rows*q)+tx+(ty*GRID.cols);
+					spr=arcade.addSprite(sprite,side?-TILE.size:GRID.width,random(GRID.hheight,GRID.height));
+					spr.afterTime=(Math.floor(seq/2)*10)+((seq%2)*5);
+					spr.onTime={playAudio:"beepdown",set:{countGold:spr.element=="gold",angle:0,spin:random(-10,10),onOffScreen:{remove:1},gravityY:1,speedY:random(-20,-10),speedX:side?speedX=random(5,10):random(-10,-5)}};	
+				}
+			},
+			background:[{
+				color:[4,0,2,3],
+				scrollx:[-1,1,0],
+				scrolly:[-1,1,0],
+				map:[[[9]]]
+			}],
+			
+			foe:{onTap:{spawn:[{sprite:"spikes"}],loseLife:1,explode:1,remove:1},speedLimitY:30,speedLimitY:30,element:"foe",spriteX:409,spriteY:69,width:TILE.size,height:TILE.size,onHit:{loseLife:1,kill:1,explode:1,other:{hit:1}}},
+			gold:{onTap:{spawn:[{sprite:"coin"}],earnGold:1,explode:1,remove:1},speedLimitY:30,speedLimitY:30,element:"gold",spriteX:443,spriteY:69,width:TILE.size,height:TILE.size,onHit:{earnGold:1,kill:1}},
+			block:{onTap:{explode:1,remove:1},speedLimitY:30,speedLimitY:30,element:"block",spriteX:375,spriteY:69,width:TILE.size,height:TILE.size},
+			spikes:{
+				zIndex:2000,
+				element:"hud",spriteX:91,spriteY:121,width:TILE.hsize,height:TILE.hsize,
+				invulnerabilityTimer:25,onAfterInvulnerability:{remove:1},speedY:-1
+			},
+			coin:{
+				zIndex:2000,
+				element:"hud",spriteX:1,spriteY:103,animationFrames:6,animationSpeed:2,width:TILE.hsize,height:TILE.hsize,
+				invulnerabilityTimer:25,onAfterInvulnerability:{remove:1},speedY:-1
+			}
+		},
+		golfybomb:{
+			title:"Golfy Bomb",
+			instructions:[
+				"HIT THE BALL AND GET COINS!",
+				"DRAG THE BALL AND CHARGE SHOT",
+				"TAP TO START"
+			],
+			startGesture:"tap",			
+			addSprite:function(sprite,x,y,tx,ty) { arcade.addSprite(sprite,x,y); },
+			background:[{
+				color:[3],
+				scrollx:[0],
+				scrolly:[0],
+				map:[[[1,2],[2,1]]]
+			}],
+			
+			foe:{element:"foe",spriteX:91,spriteY:121,width:TILE.hsize,height:TILE.hsize,onHit:{loseLife:1,remove:1,explode:1,other:{hit:1}}},
+			gold:{countGold:1,element:"gold",spriteX:1,spriteY:103,animationFrames:6,animationSpeed:2,width:TILE.hsize,height:TILE.hsize,onHit:{earnGold:1,kill:1}},
+			block:{element:"block",spriteX:341,spriteY:69,width:TILE.size,height:TILE.size},
+			player:{
+				zIndex:2000,
+				walls:["block"],
+				hits:["foe","gold"],
+				movement:"golf",
+				onFlick:{playAudio:"slide"},
+				onBump:{playAudio:"bump"},
+				animation:"aim",
+				invulnerabilityTime:25,
+				isPlayer:1,
+
+				restitutionX:0.3,
+				restitutionY:0.3,
+
+				speed:9,
+
+				spriteX:271,
+				spriteY:121,
+
+				edgeLeftRight:[0,0],edgeUpDown:[0,0],
+				element:"ball",				
+				width:TILE.hsize,height:TILE.hsize
+			}
+		},
+		flickyball:{
+			title:"Flicky Ball",
+			instructions:[
+				"BREAK WALLS, COLLECT COINS!",
+				"FLICK ANYWHERE TO THROW THE BALL",
+				"TAP TO START"
+			],
+			startGesture:"tap",
+			spawners:[
+				{
+					element:"ball",
+					x:GRID.height-TILE.size,
+					y:(GRID.height-TILE.hsize)/2
+				}
+			],
+			addSprite:function(sprite,x,y,tx,ty) {
+				for (var q=1;q<5;q++) {
+					spr=arcade.addSprite(sprite,(-q*GRID.width)+x,y);
+					spr.afterTime=Math.floor(-spr.x+TILE.size);
+					spr.onTime={set:{countGold:spr.element=="gold",onOffScreen:{remove:1}}}
+				}
+			},
+			finalizeStage:function() {
+				arcade.addSprite(this.playerElement,GRID.height-TILE.size-TILE.hhsize,GRID.hheight-TILE.size);					
+			},
+			background:[{
+				color:[4,0,2],
+				scrollx:[0.5],
+				scrolly:[0],
+				map:[[[9,8]],[[9]],[[8]]]
+			}],
+			foe:{
+				element:"foe",spriteX:91,spriteY:121,width:TILE.hsize,height:TILE.hsize,onHit:{loseLife:1,remove:1,explode:1,other:{kill:1}},
+				speedX:1
+			},
+			gold:{
+				element:"gold",spriteX:1,spriteY:103,animationFrames:6,animationSpeed:2,width:TILE.hsize,height:TILE.hsize,
+				onHit:{kill:1,earnGold:1},
+				speedX:1
+			},
+			block:{
+				element:"block",spriteX:307,spriteY:69,width:TILE.size,height:TILE.size,onHit:{explode:1,kill:1},
+				speedX:1
+			},
+			ball:{
+				zIndex:2000,
+				walls:["block"],
+				hits:["foe","gold"],
+				onOffScreen:{remove:1},
+				movement:"flick",
+
+				restitutionX:1,
+				restitutionY:1,
+				onBump:{playAudio:"bump"},
+				onFlick:{playAudio:"slide"},
+
+				speed:9,
+
+				spriteX:199,
+				spriteY:121,
+
+				edgeLeftRight:[0,-1],edgeUpDown:[0,0],
+				element:"ball",				
+				width:TILE.hsize,height:TILE.hsize
+			},
+			playerElement:{
+				zIndex:2001,
+				movement:"setangle",
+				spriteX:171,
+				spriteY:1,				
+				isPlayer:1,				
+				edgeLeftRight:[0,0],
+				element:"player",				
+				width:TILE.size,height:TILE.size*2,startMode:"tap"
+			}
+		},
+		zippyboat:{
+			title:"Zippy Boat",
+			instructions:[
+				"DODGE BOMBS AND ROCKS!",
+				"TAP TO CHANGE DIRECTION",
+				"TAP TO START"
+			],
+			startGesture:"tap",			
+			addSprite:function(sprite,x,y,tx,ty) {
+				for (var q=0;q<5;q++) {
+					var spr=arcade.addSprite(sprite,x,GRID.height+(ty*TILE.size*3)+(q*GRID.height*3)+((TILE.size-sprite.height)/2));
+					spr.afterTime=Math.floor((spr.y-TILE.dsize)/3);
+					spr.onTime={set:{countGold:spr.element=="gold",onOffScreen:{remove:1}}}
+				}
+			},
+			finalizeStage:function() {
+				arcade.addSprite(this.playerElement,GRID.hwidth,TILE.size);					
+			},
+			background:[{
+				color:[4],
+				scrollx:[0],
+				scrolly:[-3],
+				map:[[[12]]]
+			}],
+			foe:{
+				element:"foe",spriteX:91,spriteY:121,width:TILE.hsize,height:TILE.hsize,onHit:{loseLife:1,remove:1,explode:1,other:{hit:1}},
+				speedY:-3
+			},
+			gold:{
+				element:"gold",spriteX:1,spriteY:103,animationFrames:6,animationSpeed:2,width:TILE.hsize,height:TILE.hsize,onHit:{earnGold:1,kill:1},
+				speedY:-3
+			},
+			block:{
+				element:"block",spriteX:171,spriteY:69,width:TILE.size,height:TILE.size,onHit:{kill:1,explode:1,other:{set:{stun:10}}},
+				speedY:-3
+			},
+			playerElement:{
+				hits:["foe","block","gold"],
+				invulnerabilityTime:25,
+				edgeLeftRight:[0,0],
+				restitutionX:1,
+				speedX:3,
+				onFlick:{playAudio:"slide"},
+				onBump:{playAudio:"bump"},
+
+				movement:"boaty",
+				spriteX:235,
+				spriteY:121,
+				engineEffect:"smokeup",
+				engineSpeedX:0,
+				engineSpeedY:-12,
+				zIndex:2000,
+
+				isPlayer:1,				
+				element:"player",				
+				width:TILE.hsize,height:TILE.hsize,startMode:"tap"
+			}
+		},
+		brainytap:{
+			title:"Brainy Tap",
+			instructions:[
+				"HIT THE COINS...",
+				"DON'T HIT THE SPIKES!",
+				"TAP TO START"
+			],
+			startGesture:"tap",
+			hideGrid:1,
+			addSprite:function(sprite,x,y,tx,ty) { arcade.addSprite(sprite,x,y); },
+			background:[{
+				color:[4,0,2],
+				scrollx:[1,-1],
+				scrolly:[1,-1],
+				map:[[[9]]]
+			}],
+			foe:{
+				element:"block",spriteX:137,spriteY:69,width:TILE.size,height:TILE.size,
+				onTap:{spawn:[{sprite:"spikes"}],loseLife:1,explode:1,remove:1}
+			},
+			gold:{
+				countGold:1,
+				element:"block",spriteX:137,spriteY:69,width:TILE.size,height:TILE.size,
+				onTap:{spawn:[{sprite:"coin"}],earnGold:1,kill:1}
+			},
+			player:{
+				element:"block",spriteX:137,spriteY:69,width:TILE.size,height:TILE.size,
+				onTap:{kill:1,playAudio:"beep"}
+			},
+			block:{
+				element:"block",spriteX:137,spriteY:69,width:TILE.size,height:TILE.size,
+				onTap:{kill:1,playAudio:"beep"}
+			},		
+			spikes:{
+				zIndex:2000,
+				element:"hud",spriteX:91,spriteY:121,width:TILE.hsize,height:TILE.hsize,
+				invulnerabilityTimer:25,onAfterInvulnerability:{remove:1},speedY:-1
+			},
+			coin:{
+				zIndex:2000,
+				element:"hud",spriteX:1,spriteY:103,animationFrames:6,animationSpeed:2,width:TILE.hsize,height:TILE.hsize,
+				invulnerabilityTimer:25,onAfterInvulnerability:{remove:1},speedY:-1
+			}
+		},
+		breakyball:{
+			title:"Breaky Ball",
+			instructions:[
+				"BREAK WALLS, COLLECT COINS!",
+				"DRAG THE BAT LEFT/RIGHT",
+				"TAP TO START"
+			],
+			startGesture:"tap",
+			spawners:[
+				{
+					element:"ball",
+					x:(GRID.width-TILE.hsize)/2,
+					y:GRID.hheight
+				}
+			],
+			addSprite:function(sprite,x,y,tx,ty) {
+				for (var q=0;q<5;q++) {
+					var spr=arcade.addSprite(sprite,x,y-GRID.height-(q*GRID.height));
+					spr.afterTime=Math.floor(-spr.y+TILE.size);
+					spr.onTime={set:{countGold:spr.element=="gold",onOffScreen:{remove:1}}}
+				}
+			},
+			finalizeStage:function() {
+				arcade.addSprite(this.playerElement,(GRID.width-this.playerElement.width)/2,GRID.height-TILE.size);					
+			},
+			background:[{
+				color:[4,0,2,3],
+				scrollx:[0],
+				scrolly:[0.5],
+				map:[[[9]]]
+			}],
+			foe:{
+				element:"block",spriteX:103,spriteY:69,width:TILE.size,height:TILE.size,
+				onHit:{kill:1,explode:1,spawn:[{sprite:"spikes"}],playAudio:"beepup"},
+				speedY:1
+			},
+			gold:{
+				element:"gold",spriteX:1,spriteY:103,animationFrames:6,animationSpeed:2,width:TILE.hsize,height:TILE.hsize,
+				onHit:{kill:1,earnGold:1},
+				speedY:1
+			},
+			block:{
+				element:"block",spriteX:69,spriteY:69,width:TILE.size,height:TILE.size,onHit:{explode:1,remove:1},
+				speedY:1
+			},
+			playerElement:{
+				zIndex:2000,
+				movement:"dragleftright",
+				hits:["foe"],
+				invulnerabilityTime:25,
+				dragSpeed:8,
+				spriteX:145,
+				spriteY:121,				
+				isPlayer:1,				
+				edgeLeftRight:[0,0],
+				element:"player",				
+				width:TILE.size+TILE.hsize,height:TILE.hsize,startMode:"tap"
+			},
+			spikes:{zIndex:2000,element:"foe",spriteX:91,spriteY:121,width:TILE.hsize,height:TILE.hsize,gravityY:1,onOffScreen:{remove:1},onHit:{other:{hit:1},loseLife:1,explode:1,remove:1}},
+			ball:{
+				zIndex:2000,
+				walls:["block"],
+				hits:["foe","gold"],
+				bounceOn:["player"],
+				onOffScreen:{remove:1,loseLife:1},
+
+				restitutionX:1,
+				restitutionY:1,
+
+				invulnerabilityTimer:10,
+				onAfterInvulnerability:{aimTo:"player"},
+
+				speed:9,
+
+				movement:"ball",
+				spriteX:199,
+				onBump:{playAudio:"bump"},
+				spriteY:121,
+
+				edgeLeftRight:[0,0],edgeUpDown:[0,-1],
+				element:"ball",				
+				width:TILE.hsize,height:TILE.hsize
+			}
+		},
+		jumpyrocket:{
+			title:"Jumpy Rocket",
+			instructions:[
+				"KEEP FLYING AND GET COINS!",
+				"TAP TO FLY",
+				"TAP TO START"
+			],
+			startGesture:"tap",
+			addSprite:function(sprite,x,y,tx,ty) {
+				for (var q=0;q<5;q++) {
+					var spr=arcade.addSprite(sprite,GRID.width+(tx*TILE.size*4)+(q*GRID.width*4)+((TILE.size-sprite.width)/2),y);
+					spr.afterTime=Math.floor((spr.x-TILE.dsize)/4);
+					spr.onTime={set:{countGold:spr.element=="gold",onOffScreen:{remove:1}}}
+				}
+			},
+			finalizeStage:function() {
+				arcade.addSprite(this.playerElement,TILE.hsize,GRID.hheight);	
+			},
+			background:[{
+				color:[0],
+				scrollx:[-1],
+				scrolly:[0],
+				map:[
+					[[1,2],[2,1]],
+					[[3,0,4]]
+				]
+			},{
+				color:[4],
+				scrollx:[-1],
+				scrolly:[0],
+				map:[
+					[[0,0,5],[0,0,0],[0,5,0],[0,0,0],[7,7,7]]
+				]
+			}],
+			background:[{
+				color:[5],
+				scrollx:[-1],
+				scrolly:[0],
+				map:[
+					[[0,0,5],[0,5,0],[7,7,7],[10,10,10],[12,12,12]]
+				]
+			}],
+			foe:{
+				element:"foe",spriteX:91,spriteY:121,width:TILE.hsize,height:TILE.hsize,onHit:{loseLife:1,remove:1,explode:1,other:{hit:1}},
+				speedX:-4
+			},
+			gold:{
+				element:"gold",spriteX:1,spriteY:103,animationFrames:6,animationSpeed:2,width:TILE.hsize,height:TILE.hsize,onHit:{earnGold:1,kill:1},
+				speedX:-4
+			},
+			block:{
+				element:"block",spriteX:35,spriteY:69,width:TILE.size,height:TILE.size,onHit:{kill:1,explode:1,other:{set:{stun:5}}},
+				speedX:-4
+			},
+			playerElement:{
+				hits:["foe","block","gold"],
+				invulnerabilityTime:25,
+				edgeUpDown:[0,0],
+
+				movement:"flappy",
+				animation:"flappy",
+				spriteX:127,
+				spriteY:121,
+				zIndex:2000,
+				onJump:{playAudio:"beep"},
+
+				jumpSpeed:-6,
+				engineEffect:"engine",
+				engineSpeedX:-4,
+				engineSpeedY:0,
+
+				isPlayer:1,				
+				element:"player",				
+				width:TILE.hsize,height:TILE.hsize,startMode:"tap",gravityY:1
+			}
+		},
+		slideyninja:{
+			title:"Slidey Ninja",
+			instructions:[
+				"USE WALL JUMP AND SLIDE!",
+				"SWIPE LEFT/RIGHT TO START",
+				"TAP TO JUMP"
+			],
+			startGesture:"swipeleftright",
+			addSprite:function(sprite,x,y,tx,ty) { arcade.addSprite(sprite,x,y) },
+			background:[{
+				color:[0],				
+				scrollx:[0],
+				scrolly:[0],
+				map:[[[1,2],[2,1],[1,2],[2,1],[10,10]]]
+			},{
+				color:[4],				
+				scrollx:[0],
+				scrolly:[0],
+				map:[[[0,0,0,5,0],[0,11,0,0,5],[0,0,0,5,0],[0,5,0,0,0],[6,7,7,7,6]]]
+			},{
+				color:[5],				
+				scrollx:[0],
+				scrolly:[0],
+				map:[[[4,0,0,0,3],[4,11,0,0,3],[4,0,0,0,3],[4,0,0,0,3],[4,7,7,7,3]]]
+			}],
+			foe:{element:"foe",spriteX:91,spriteY:121,width:TILE.hsize,height:TILE.hsize,onHit:{loseLife:1,remove:1,explode:1,other:{hit:1}}},
+			gold:{countGold:1,element:"gold",spriteX:1,spriteY:103,animationFrames:6,animationSpeed:2,width:TILE.hsize,height:TILE.hsize,onHit:{earnGold:1,kill:1}},
+			block:{element:"block",spriteX:1,spriteY:69,width:TILE.size,height:TILE.size},
+			player:{
+				zIndex:2000,
+				hits:["gold","foe"],
+				invulnerabilityTime:25,
+
+				movement:"ninja",
+				animation:"platformer",
+				onJump:{playAudio:"beep"},
+				onSlide:{playAudio:"slide"},
+				spriteX:1,
+				spriteY:121,
+
+				normalGravity:1,
+				slideGravity:2,
+				flickForce:4,
+				jumpSpeed:-12,
+
+				isPlayer:1,				
+				edgeLeftRight:[0,0],edgeUpDown:[0,0],
+				element:"player",				
+				width:TILE.hsize,height:TILE.hsize,startMode:"pushleftright",walls:["block"],restitutionX:-1,restitutionY:0,gravityY:1
+			}
+		}
+	}
+
+	// --- ARCADE GAME ENGINE CONFIGURATION
+
+	var arcadeScreenshake=0;
+
+	function resetArcade() {
+		arcade=new Arcade(BASICARCADE);
+		gamegenre=0;
+		gamegenreid=0;
+		arcadeScreenshake=0;
+	}
+
+	function runArcade(runsprites) {
+		if (arcade) {
+			if (runsprites) arcade.runSprites();
+			arcade.renderSprites();
+			if (arcadeScreenshake) {
+				arcadeScreenshake--;
+				screen.ctx.drawImage(arcadecnv.cnv,GRID.x+shaky(),GRID.y+shaky());
+			} else screen.ctx.drawImage(arcadecnv.cnv,GRID.x,GRID.y);
+		}
+	}
+
+	function addLabelAt(x,y,font,color,text) {
+		return arcade.addSprite({
+			animation:"label",
+			width:1,
+			height:1,
+			speedY:-1,
+			afterTime:10,
+			onTime:{remove:1},
+			color:color,
+			font:font,
+			text:text
+		},x,y)
+	}
+
+	function addSpriteAt(spr,atspr,dx,dy) {
+		if (!dx) dx=0;
+		if (!dy) dy=0;
+		return arcade.addSprite(
+			spr,
+			atspr.x+((atspr.width-spr.width)/2)+dx,
+			atspr.y+((atspr.height-spr.height)/2)+dy,
+		);
+	}
+
+	function spriteIsTapped(spr) {
+		return dragStart&&arcade.collidesWith(spr,{alive:1,x:dragStart.x-GRID.x-TAPSIZE,y:dragStart.y-GRID.y-TAPSIZE,width:TAPSIZE*2,height:TAPSIZE*2});
+	}
+
+	function spriteDistanceFromTap(spr) {
+		return spr&&dragPoint?arcade.calculateDistance(spr,{x:dragPoint.x-GRID.x,y:dragPoint.y-GRID.y,width:1,height:1}):0;
+	}
+
+	function killSprite(spr) {		
+		spr.alive=0;
+		return arcade.addSprite(
+			{
+				movement:"corpse",
+				countedGold:spr.countedGold,
+				zIndex:1100,
+				angle:0,
+				width:spr.width,
+				height:spr.height,
+				speedY:-5,
+				speedX:random(-2,2),
+				gravityY:1,
+				speedLimitY:16,
+				spriteX:spr.spriteX,
+				spriteY:spr.spriteY,
+				onOffScreen:{remove:1}
+			},
+			spr.x,
+			spr.y
+		);
+	}
+
+	function executeAction(sprfrom,sprtox,act) {
+		if (act) {
+			if (act.log) console.log(act.log);
+			if (act.set)
+				for (var a in act.set)
+					sprtox[a]=act.set[a];
+			if (act.remove) sprtox.alive=0;
+			if (act.kill) killSprite(sprtox);
+			if (act.explode) {
+				explodeSprite(sprtox,act.explosionType);
+				AUDIO.play("blam");
+			}
+			if (act.earnGold&&(lives>0)) {
+				AUDIO.play("coin");
+				gold+=goldValue;
+				arcadeEarnings+=goldValue;
+				arcadeGold++;
+				puzzleTime+=timepercoin;
+				if (puzzleTime>ALLTIME) puzzleTime=ALLTIME;
+			}
+			if (act.playAudio) AUDIO.play(act.playAudio);
+			if (act.loseLife&&(lives>0)&&(!sprfrom||!sprfrom.invulnerabilityTimer)) {
+				AUDIO.play("loselife");
+				lives--;
+				arcadeDeaths++;
+				arcadeScreenshake=10;
+			}
+			if (act.spawn) {
+				var spawn=randomElement(act.spawn);
+				var spr=addSpriteAt(gamegenre[spawn.sprite],sprtox);	
+				if (spawn.set)
+					for (var a in spawn.set)
+						spr[a]=spawn.set[a];	
+			}
+			if (act.hit) sprtox.invulnerabilityTimer=sprtox.invulnerabilityTime;
+			if (act.aimTo) {
+				var to=arcade.getElements(act.aimTo);
+				if (to.length)
+					arcade.applyVector(sprtox,arcade.calculateAngle(sprtox,to[0]),sprtox.speed);
+			}
+			if (act.other) executeAction(sprtox,sprfrom,act.other);
+		}
+	}
+
+	function explodeSprite(spr,type) {
+		switch (type) {
+			case 1:{
+				for (var i=0;i<10;i++) {
+					var expl=addSpriteAt(BASICARCADESPRITES.poof,spr,random(-8,8),random(-8,8));
+					expl.speedX=random(-2,2);
+					expl.speedY=random(-2,2);
+				}
+				break;
+			}
+			default:{
+				for (var i=0;i<3;i++) {
+					var expl=addSpriteAt(BASICARCADESPRITES.bigexplosion,spr,random(-8,8),random(-8,8));
+					expl.speedX=random(-2,2);
+					expl.speedY=random(-2,2);
+				}
+				for (var i=0;i<6;i++) {
+					var expl=addSpriteAt(BASICARCADESPRITES.midexplosion,spr,random(-8,8),random(-8,8));
+					expl.speedX=random(-4,4);
+					expl.speedY=random(-4,4);
+				}
+				for (var i=0;i<6;i++) {
+					var expl=addSpriteAt(BASICARCADESPRITES.smallexplosion,spr,random(-8,8),random(-8,8));
+					expl.speedX=random(-8,8);
+					expl.speedY=random(-8,8);
+				}
+				break;
+			}
+		}
+	}
+
+	var BASICARCADESPRITES={
+		healthpopup:{
+			spriteX:253,
+			spriteY:103,
+			width:TILE.hsize,height:TILE.hsize,
+			speedY:-1,
+			afterTime:10,
+			zIndex:2000,
+			onTime:{remove:1}
+		},
+		extralifepopup:{
+			spriteX:271,
+			spriteY:103,
+			width:TILE.hsize,height:TILE.hsize,
+			animationSpeed:1,
+			animationFrames:3,
+			speedY:-0.5,
+			afterTime:20,
+			zIndex:2000,
+			onTime:{remove:1}
+		},
+		timepopup:{
+			angle:0,
+			spriteX:325,
+			spriteY:103,
+			width:TILE.hsize,height:TILE.hsize,
+			speedY:-1,
+			afterTime:10,
+			zIndex:2000,
+			onTime:{remove:1}
+		},
+		bigexplosion:{
+			animation:"spark",
+			alwaysRun:1,
+			time:-1,
+			sparkTime:3,
+			sparkSpeed:1,
+			zIndex:1200,
+			element:"spark",spriteX:35,spriteY:1,width:TILE.size,height:TILE.size
+		},
+		midexplosion:{
+			animation:"spark",
+			alwaysRun:1,
+			time:-1,
+			sparkTime:7,
+			sparkSpeed:2,
+			zIndex:1300,
+			element:"spark",spriteX:109,spriteY:103,width:TILE.hsize,height:TILE.hsize
+		},
+		smallexplosion:{
+			animation:"spark",
+			alwaysRun:1,
+			time:-1,
+			sparkTime:11,
+			sparkSpeed:3,
+			zIndex:1400,
+			element:"spark",spriteX:181,spriteY:103,width:TILE.hhsize,height:TILE.hhsize
+		},
+		smokeup:{
+			animation:"spark",
+			alwaysRun:1,
+			time:-1,
+			sparkTime:2,
+			sparkSpeed:1,
+			speedY:-4,
+			zIndex:1500,
+			element:"spark",spriteX:221,spriteY:103,width:TILE.hhsize,height:TILE.hhsize	
+		},
+		poof:{
+			animation:"spark",
+			alwaysRun:1,
+			time:-1,
+			sparkTime:8,
+			sparkSpeed:3,
+			zIndex:1500,
+			element:"spark",spriteX:221,spriteY:103,width:TILE.hhsize,height:TILE.hhsize	
+		},
+		engine:{
+			animation:"spark",
+			alwaysRun:1,
+			time:-1,
+			sparkTime:3,
+			sparkSpeed:1,
+			zIndex:1500,
+			element:"spark",spriteX:181,spriteY:103,width:TILE.hhsize,height:TILE.hhsize
+		}
+	}
+
+	var BASICARCADE={
+		width:GRID.width,
+		height:GRID.height,
+		areaWidth:GRID.width,
+		areaHeight:GRID.height,
+		onDrawBackground:function(x,y,width,height) {
+			if (gamegenre) {
+				if (background.color!==undefined)
+					blitRect(arcadecnv,background.color,x,y,width,height);
+				if (background.map) {
+					var rx,ry,ox,oy;
+					var tx=Math.floor(-background.scrollx*testTimer/TILE.dsize)%background.map[0].length;
+					var ty=Math.floor(-background.scrolly*testTimer/TILE.dsize)%background.map.length;
+					var dx=(background.scrollx*testTimer)%TILE.dsize;
+					var dy=(background.scrolly*testTimer)%TILE.dsize;
+					if (dx>0) dx-=TILE.dsize;
+					if (dy>0) dy-=TILE.dsize;
+					if (tx<0) tx+=background.map[0].length;
+					if (ty<0) ty+=background.map.length;
+					for (var y=0;y<GRID.cols+2;y++) {
+						ry=(y+ty)%background.map.length;
+						for (var x=0;x<GRID.rows+2;x++) {
+							rx=(x+tx)%background.map[ry].length;
+							ox=background.map[ry][rx];
+							if (ox) {
+								ox--;
+								oy=606+Math.floor(ox/9)*(TILE.dsize+2);
+								ox=1+Math.floor(ox%9)*(TILE.dsize+2);
+								blitSprite(arcadecnv,ox,oy,TILE.dsize,TILE.dsize,dx+x*TILE.dsize,dy+y*TILE.dsize);
+							}
+						}
+					}
+				}
+			} else
+				arcadecnv.cnv.width=arcadecnv.cnv.width;
+		},
+		onDead:function(spr) { executeAction(0,spr,spr.onDead); },
+		onDraw:function(spr,x,y,width,height) {
+			if (!spr.hidden) {
+				var frame=0;
+				if (spr.spin) spr.angle+=spr.spin;
+				if (spr.stun) x+=shaky();
+				if (spr.animationSpeed)
+					frame=Math.floor(timer/spr.animationSpeed)%spr.animationFrames;
+				switch (spr.animation) {
+					case "label":{
+						blitText(arcadecnv,spr.font,spr.color,spr.x,spr.y,spr.text,2);
+						break;
+					}
+					case "aim":{
+						blitSprite(arcadecnv,spr.spriteX,spr.spriteY,spr.width,spr.height,x,y);
+						if (spr.shotCharging)
+							blitSprite(arcadecnv,171,1,TILE.size,TILE.size*2,x-TILE.hhsize,y-TILE.hsize-TILE.hhsize,0,1,1,spr.shotAngle);
+						break;
+					}
+					case "spark":{
+						spr.time++;
+						if (spr.time>spr.sparkTime)
+							spr.alive=0;
+						else
+							blitSprite(arcadecnv,spr.spriteX,spr.spriteY,spr.width,spr.height,x,y,Math.floor(spr.time/spr.sparkSpeed));	
+						break;
+					}
+					case "jetpack":{
+						if (spr.thrust)
+								frame=0;
+							else
+								frame=Math.floor(timer/5)%2;
+						blitSprite(arcadecnv,spr.spriteX,spr.spriteY,spr.width,spr.height,x,y,frame);
+						break;
+					}
+					case "platformer":{
+						if (spr.slide)
+							frame=4;
+						else if (spr.touchVertical[1])
+							if (spr.speedX)
+								frame=Math.floor(timer/5)%2;
+							else
+								frame=0;
+						else if (spr.speedY>0)
+							frame=3;
+						else frame=2;
+						blitSprite(arcadecnv,spr.spriteX,spr.spriteY,spr.width,spr.height,x,y,frame,spr.speedX>0?1:-1,1);
+						break;
+					}
+					case "flappy":{
+						blitSprite(arcadecnv,spr.spriteX,spr.spriteY,spr.width,spr.height,x,y,frame,spr.speedX<0?-1:1,1,spr.speedY*10);
+						break;
+					}
+					default:{
+						blitSprite(arcadecnv,spr.spriteX,spr.spriteY,spr.width,spr.height,x,y,frame,spr.flipX,spr.flipY,spr.angle);
+						break;
+					}
+				}
+				if (spr.color) blitRect(arcadecnv,spr.color,x,y,spr.width,spr.height);
+			}
+		},
+		onGameLogic:function() {
+			if (lives&&gamegenre&&gamegenre.spawners) {
+				var spawner=gamegenre.spawners[i];
+				for (var i=0;i<gamegenre.spawners.length;i++) {
+					spawner=gamegenre.spawners[i];
+					if (!arcade.getElements(spawner.element).length)
+						arcade.addSprite(gamegenre[spawner.element],spawner.x,spawner.y);
+				}
+			}
+		},
+		onCollision:function(spr,spr2) {
+			if (!spr2.invulnerabilityTimer) executeAction(spr,spr2,spr2.onHit);				
+			if (!spr.invulnerabilityTimer) executeAction(spr2,spr,spr.onHits);
+		},
+		onLogic:function(spr) {
+
+			if (spr.isPlayer) spr.button=events.hold;
+			else spr.button=0;
+
+			if (spr.countGold&&!spr.countedGold) {				
+				spr.countedGold=1;				
+				arcadeAllGold++;
+			}
+
+			if (_DEBUGCOUNTGOLD&&spr.countedGold) spr.color=random(1,7);
+
+			if (spr.onBump)
+				if (
+					((spr.touchHorizontal[0]||spr.touchHorizontal[1])&&(Math.abs(spr.speedX)>0.2))||
+					((spr.touchVertical[0]||spr.touchVertical[1])&&(Math.abs(spr.speedY)>0.2))
+				)
+					executeAction(0,spr,spr.onBump);
+
+			if (!spr.started) {
+				switch (spr.startMode) {
+					case "pushleftright":{
+						if (startGesture=="swiperight") spr.speedX=spr.flickForce;
+						else spr.speedX=-spr.flickForce;
+						spr.started=true;						
+						break;
+					}
+					default:{
+						spr.started=true;
+					}
+				}
+			}
+
+			if (spr.stun) {
+				spr.stun--;
+				switch (spr.movement) {
+					case "dragleftright":{
+						spr.speedX=0;
+						break;
+					}
+					case "dragupdown":{
+						spr.speedY=0;
+						break;
+					}
+					case "jetpack":{
+						spr.thrust=spr.engineEffect=false;
+						break;
+					}
+				}
+			} else
+				switch (spr.movement) {
+					case "moveflick":{
+						if (events.flick) {
+							explodeSprite(spr,1);
+							var ox=spr.x,oy=spr.y;
+							switch (Math.floor(((events.flick.stick+45)%360)/90)) {
+								case 0:{
+									spr.y-=spr.flickLength;
+									spr.angle=0;
+									break;
+								}
+								case 1:{
+									spr.x+=spr.flickLength;
+									spr.angle=90;
+									break;
+								}
+								case 2:{
+									spr.y+=spr.flickLength;
+									spr.angle=180;
+									break;
+								}
+								case 3:{
+									spr.x-=spr.flickLength;
+									spr.angle=270;
+									break;
+								}
+							}
+							if ((spr.x<0)||(spr.y<0)||(spr.y>GRID.height)||(spr.x>GRID.width)) {
+								spr.x=ox;
+								spr.y=oy;
+							} else executeAction(0,spr,spr.onJump);
+						}						
+						break;
+					}
+					case "golf":{
+						if (spr.shotCharging)
+							if (events.flick) {
+								executeAction(0,spr,spr.onFlick);
+								arcade.applyVector(spr,spr.shotAngle,spr.shotPower*spr.speed);
+								spr.shotCharging=0;
+							} else {
+								spr.shotPower=limit(spriteDistanceFromTap(spr)/(GRID.width/4),0,1);
+								spr.shotAngle=stick+180;
+							}
+						if (events.hold==1)
+							if (spriteIsTapped(spr)) spr.shotCharging=true;
+
+						break;
+					}
+					case "flick":{
+						if (events.flick) {
+							arcade.applyVector(spr,events.flick.stick,spr.speed);
+							executeAction(0,spr,spr.onFlick);
+							spr.movement=0;
+						}
+						break;
+					}
+					case "corpse":{
+						spr.angle=(Math.floor(timer/3)%4)*90;
+						break;
+					}
+					case "setangle":{
+						if (dragPoint) spr.angle=stick;
+						break;
+					}
+					case "dragleftright":{
+						if (dragPoint) {
+							var delta,dest=limit(dragPoint.x-GRID.x-(spr.width/2),0,GRID.width-spr.width);
+							delta=dest-spr.x;
+							if (Math.abs(delta)<spr.dragSpeed) spr.speedX=dest-spr.x;
+							else if (delta>0) spr.speedX=spr.dragSpeed;
+							else spr.speedX=-spr.dragSpeed;
+						} else spr.speedX=0;
+						break;
+					}
+					case "dragupdown":{
+						if (dragPoint) {
+							var delta,dest=limit(dragPoint.y-GRID.y-(spr.height/2),0,GRID.height-spr.height);
+							delta=dest-spr.y;
+							if (Math.abs(delta)<spr.dragSpeed) spr.speedY=dest-spr.y;
+							else if (delta>0) spr.speedY=spr.dragSpeed;
+							else spr.speedY=-spr.dragSpeed;
+						} else spr.speedY=0;
+						break;
+					}
+					case "flappy":{
+						if (spr.button==1) {
+							executeAction(0,spr,spr.onJump);
+							spr.speedY=spr.jumpSpeed;
+							addSpriteAt(BASICARCADESPRITES.smokeup,spr,spr.width/2+shaky(),0);
+						}
+						if (spr.touchHorizontal[0]||spr.touchHorizontal[1]) phase++;
+						break;
+					}
+					case "boaty":{
+						if (spr.button==1) {
+							executeAction(0,spr,spr.onFlick);
+							spr.speedX*=-1;					
+						}
+						break;
+					}
+					case "jetpack":{
+						if (spr.button) {
+							if (timer%3==0) executeAction(0,spr,spr.onJump);
+							spr.speedY+=spr.jetpackForce;
+							spr.thrust=spr.engineEffect="engine";
+						} else spr.thrust=spr.engineEffect=false;
+						break;
+					}
+					case "tapjump":{
+						if (spr.touchVertical[1]&&spr.button) {
+							executeAction(0,spr,spr.onJump);
+							spr.speedY=spr.jumpSpeed;
+							addSpriteAt(BASICARCADESPRITES.smokeup,spr,spr.width/2+shaky(),0);	
+						}
+						break;
+					}
+					case "ninja":{
+						spr.gravityY=spr.normalGravity;
+						spr.slide=0;
+						if (spr.touchVertical[1]) {
+							if (spr.touchHorizontal[0]) spr.speedX=spr.flickForce;
+							if (spr.touchHorizontal[1]) spr.speedX=-spr.flickForce;
+							if (spr.button) {
+								executeAction(0,spr,spr.onJump);
+								spr.speedY=spr.jumpSpeed;
+								addSpriteAt(BASICARCADESPRITES.smokeup,spr);
+							}
+						} else {
+							if (spr.touchHorizontal[0]||spr.touchHorizontal[1]) {
+								if (spr.speedY>0) {
+									if (timer%2) executeAction(0,spr,spr.onSlide);
+									spr.speedY=spr.slideGravity;
+									spr.slide=1;
+									if (spr.touchHorizontal[0]) addSpriteAt(BASICARCADESPRITES.smokeup,spr,-spr.width/2+shaky(),0);
+									else addSpriteAt(BASICARCADESPRITES.smokeup,spr,spr.width/2+shaky(),0);
+									spr.gravityY=0;	
+								}
+								if (spr.button) {
+									executeAction(0,spr,spr.onJump);
+									spr.speedY=spr.jumpSpeed;
+									addSpriteAt(BASICARCADESPRITES.smokeup,spr);
+									spr.speedX*=-1;
+								}
+							}
+						}
+						break;
+					}
+				}			
+
+
+			if (spr.engineEffect) {
+				for (var i=0;i<5;i++) {
+					var newspr=addSpriteAt(BASICARCADESPRITES[spr.engineEffect],spr,shaky(),shaky());
+					newspr.zIndex+=shaky();
+					newspr.speedX=(-spr.speedX/2)+spr.engineSpeedX+shaky();
+					newspr.speedY=(-spr.speedY/2)+spr.engineSpeedY+shaky();
+				}
+			}
+
+			if (spr.bounceOn) {
+				var hits=arcade.getCollision(spr,"bounceOn");
+				for (a in hits) {
+					executeAction(0,spr,spr.onBump);
+					arcade.applyVector(spr,arcade.calculateAngle(hits[a],spr),spr.speed);
+				}
+			}
+
+			if (spr.onOffScreen)
+				if ((spr.x+spr.width<0)||(spr.x>=GRID.width)||(spr.y+spr.height<0)||(spr.y>=GRID.height)) executeAction(0,spr,spr.onOffScreen);
+
+			if (spr.invulnerabilityTimer) {
+				spr.invulnerabilityTimer--;
+				if (!spr.invulnerabilityTimer) executeAction(0,spr,spr.onAfterInvulnerability);
+			}
+
+			if (spr.onTap)
+				if ((events.hold==1)&&spriteIsTapped(spr)) executeAction(0,spr,spr.onTap);
+
+			if (spr.onTime&&(spr.afterTime!==undefined))
+				spr.afterTime--;
+				if (spr.afterTime<=0) {
+					delete spr.afterTime;
+					executeAction(0,spr,spr.onTime);
+				}
+
+			if (spr.onPhase&&(spr.atPhase!==undefined))
+				if (phase>=spr.atPhase) {
+					delete spr.atPhase;
+					executeAction(0,spr,spr.onPhase);
+				}
+
+			if (spr.isPlayer&&!lives) killSprite(spr);
+		}
+	}	
+
+	// --- MATH HELPERS
+
+	function sineTrend(value,from,tox,speed,delta) {
+		var range=(tox-from)/2;
+		if (!delta) delta=0;
+		if (!speed) speed=1;
+		return from+range+Math.sin((value/speed)+delta)*range;
+	}
+	function getTimestamp() { return (new Date()).getTime(); };
+	function linearTrend(value,from,tox,speed) { return value<0?from:value>speed?tox:(value/speed)*(tox-from)+from; }
+	function random(from,to) { return from+Math.floor(Math.random()*(to-from+1))}
+	function randomElement(set) { return set[random(0,set.length-1)]}
+	function clone(obj) { return JSON.parse(JSON.stringify(obj))}
+	function shuffle(set) {
+		var swp,id;
+		for (var i=0;i<set.length;i++) {
+			id=random(0,set.length-1);
+			swp=set[i];
+			set[i]=set[id];
+			set[id]=swp;
+		}
+		return set;
+	}
+	function limit(val,min,max) { return val>max?max:val<min?min:val }
+
+	// --- DOM HELPERS
+
+	function addEventListener(node,evt,cb,rt) {
+		if (node.addEventListener) node.addEventListener(evt,cb,rt);
+		else node.attachEvent("on"+evt,cb)
+	}
+
+	function createCanvas(width,height) {
+		var cnv=document.createElement("canvas");		
+		cnv.width=width;
+		cnv.height=height;
+		cnv.style.MozOsxFontSmoothing="grayscale";
+		if (ISFIREFOX)
+			cnv.style.imageRendering="-moz-crisp-edges";
+		else {
+			cnv.style.imageRendering="pixelated";
+			cnv.style.fontSmoothing="none";
+		}
+		var ctx=cnv.getContext("2d");
+		ctx.webkitImageSmoothingEnabled = ctx.imageSmoothingEnabled = ctx.mozImageSmoothingEnabled = ctx.oImageSmoothingEnabled = ctx.msImageSmoothingEnabled= false;
+		return {
+			width:width,
+			height:height,
+			cnv:cnv,
+			ctx:ctx
+		}
+	}
+
+	// --- RENDERING HELPERS
+
+	function makeFont(palette,scalex,scaley) {
+		var lw=FONT.charWidth*scalex,lh=FONT.charHeight*scaley,gap=FONT.height*scaley;
+		var canvas=createCanvas(FONT.width*scalex,gap*palette.length);
+		var pixel,pixelcolor,pixelout,canvasData=canvas.ctx.getImageData(0,0,canvas.width,canvas.height);
+		for (var l=0;l<FONT.charsPerRow;l++)
+			for (var s=0;s<FONT.charsPerCol;s++)
+				for (var c=0;c<palette.length;c++)
+					for (var y=0;y<FONT.charHeight;y++)
+						for (var x=0;x<FONT.charWidth;x++) {
+							pixel=(
+								(l*FONT.charWidth)+x+
+								((s*FONT.charHeight)+y)*FONT.width
+							)*4;
+							pixelcolor=FONT.data[pixel]?palette[c]:[0,0,0,0];
+							for (var sx=0;sx<scalex;sx++)
+								for (var sy=0;sy<scaley;sy++) {
+									pixelout=(
+										(l*lw)+(x*scalex)+sx+
+										((c*gap)+(s*lh)+(y*scaley)+sy)*canvas.width
+									)*4;
+									canvasData.data[pixelout]=pixelcolor[0];
+									canvasData.data[pixelout+1]=pixelcolor[1];
+									canvasData.data[pixelout+2]=pixelcolor[2];
+									canvasData.data[pixelout+3]=pixelcolor[3];
+								}
+						}					
+		canvas.ctx.putImageData(canvasData,0,0);
+		return {lw:lw,lh:lh,gap:gap,canvas:canvas};
+	}
+
+	function clearScreen() { screen.cnv.width=screen.width; }
+
+	function blitSprite(cnv,x1,y1,w,h,x2,y2,frame,sx,sy,angle) {
+		if (!frame) frame=0;
+		x1+=frame*(2+w);
+		if (!sx&&!sy&&!angle)
+			cnv.ctx.drawImage(tilemap.cnv,x1,y1,w,h,Math.floor(x2),Math.floor(y2),w,h);
+		else {
+			var hx=w/2,hy=h/2;
+			if (sx==undefined) sx=1;
+			if (sy==undefined) sy=1;			
+			cnv.ctx.save();
+			cnv.ctx.transform(sx,0,0,sy,Math.floor(x2+hx), Math.floor(y2+hy));
+			cnv.ctx.rotate(angle*DEGTORAD);
+			cnv.ctx.translate(-hx,-hy);
+			cnv.ctx.drawImage(tilemap.cnv,x1,y1,w,h,0,0,w,h);
+			cnv.ctx.restore();
+		}
+	}
+
+	function blitText(cnv,font,color,x,y,text,align) {
+		text+="";
+		var dx=0,chr;
+		y=Math.floor(y);
+		x=Math.floor(x);
+		switch (align) {
+			case 1:{
+				dx-=text.length*font.lw;
+				break;
+			}
+			case 2:{
+				dx-=Math.floor(text.length*font.lw/2);
+				break;
+			}
+		}
+
+		for (var i=0;i<text.length;i++) {
+			chr=text.charCodeAt(i)-32;
+			cnv.ctx.drawImage(font.canvas.cnv,font.lw*(chr%FONT.charsPerRow),(color*font.gap)+(Math.floor(chr/FONT.charsPerRow)*font.lh),font.lw,font.lh,x+(i*font.lw)+dx,y,font.lw,font.lh);
+		}
+	}
+
+	function blitRect(cnv,color,x,y,width,height) {
+		cnv.ctx.fillStyle="rgba("+PALETTE[color][0]+","+PALETTE[color][1]+","+PALETTE[color][2]+","+PALETTE[color][3]+")";
+		cnv.ctx.fillRect(Math.floor(x),Math.floor(y),Math.floor(width),Math.floor(height));
+	}
+
+	// --- ANIMATION HELPERS
+
+	function blinkColors(col1,col2) { return Math.floor(timer/2)%2?col1:col2; }
+	function wavy() { return Math.sin(timer/3)*3 }
+	function shaky() { return random(-1,1) }
+
+	// --- GAME UI
+
+	function drawHud(arcade) {
+		clearScreen();			
+		blitRect(screen,7,GRID.x+LIFEGAUGESIZE+10,GRID.x,GAUGESIZE,TILE.size+TILE.hsize);
+		if (arcade) {			
+			blitRect(screen,1,GRID.x+LIFEGAUGESIZE+10,GRID.x,GAUGESIZE/ALLTIME*puzzleTime,TILE.size);
+			blitRect(screen,5,GRID.x+LIFEGAUGESIZE+10,GRID.x+TILE.hsize,GAUGESIZE/ALLTIME*arcadeTime,TILE.size);
+		} else {
+			blitRect(screen,5,GRID.x+LIFEGAUGESIZE+10,GRID.x+TILE.hsize,GAUGESIZE/ALLTIME*arcadeTime,TILE.size);
+			blitRect(screen,1,GRID.x+LIFEGAUGESIZE+10,GRID.x,GAUGESIZE/ALLTIME*puzzleTime,TILE.size);				
+		}
+		blitText(screen,FONT.normal,2,GRID.x+GRID.width,(GRID.y-FONT.normal.lh)/2,gold+"$",1);
+		blitRect(screen,7,GRID.x,GRID.y-TILE.hsize-GRID.x,LIFEGAUGESIZE,TILE.hsize);
+		blitRect(screen,5,GRID.x,GRID.y-TILE.hsize-GRID.x,LIFEGAUGESIZE/allPointToLives*pointToLives,TILE.hsize);
+		blitText(screen,FONT.normal,5,GRID.x+(LIFEGAUGESIZE/2),GRID.x,HEARTSYMBOL+lives,2);
+	}
+
+	function drawMap(rumble) {
+		var tiledata,tileeffect,px,py;
+		if (rumble&&(playerinmap!=-1)&&(puzzleTime<PANICTIME)) {
+			if (puzzleTime%3==0) AUDIO.play("alarm"+(Math.floor(puzzleTime/6)%2));
+			drawGrid(screen,GRID.x+shaky(),GRID.y);
+		} else
+			drawGrid(screen,GRID.x,GRID.y);
+		if (playerinmap!=-1) {
+			var y=Math.sin(timer/4)*4;
+			blitSprite(screen,1,25-y,TILE.size,TILE.hhsize+y,TILE.size*playerinmap+GRID.x,GRID.y);
+		}
+	}
+
+	// --- MATCH-3 GAMEPLAY
+
+	var map,playerinmap,mapeffects={};
+	var chapters,edition,stages,stage;
+	var blockodds,enemyodds,specialblockodds,timepercoin;
+	var giveratiopoints,giveratiotime;
+
+	function randomizePlayer() { playerinmap=random(0,GRID.cols-1)}
+
+	function setTileEffect(x,y,effect) {
+		if (map[y]&&(map[y][x]!==undefined))
+			mapeffects[x+","+y]=effect;
+	}
+
+	function clearEffect(effect) {
+		for (var a in mapeffects)
+			if (mapeffects[a].type==effect) mapeffects[a]=0;
+	}
+
+	function randomTile() {
+		if (random(0,100)<specialblockodds)
+			if (random(0,100)<enemyodds)
+				return 1;
+			else
+				return 2;
+		else if (random(0,100)<blockodds)
+			return 3;
+		else
+			return 4;
+	}
+
+	function randomPlayer() { return randomElement(stage.games) }
+
+	function collectMatch(map,x,y,tile,set) { if (map[y]&&(map[y][x]!==undefined)&&((map[y][x]==tile)||(TILES[map[y][x]].player))) return set.push({x:x,y:y}); }
+
+	function collectMatchSide(map,x,y,dx,dy,tile,set) {
+		while (true) {
+			x+=dx;
+			y+=dy;
+			if (!collectMatch(map,x,y,tile,set)) break;
+		}
+	}
+
+	function collectMatchLine(map,x,y,dx,dy) {
+		var tile=map[y][x];
+		var set=[];
+		collectMatchSide(map,x,y,1*dx,1*dy,tile,set);
+		collectMatchSide(map,x,y,-1*dx,-1*dy,tile,set)
+		return set;
+	}
+
+	function triggerMatch(map,x,y) {
+		var out=[{x:x,y:y}],time=map[y][x],dx,dy;
+		var seth=collectMatchLine(map,x,y,1,0);
+		var setv=collectMatchLine(map,x,y,0,1);
+		if (seth.length>1) out=out.concat(seth);
+		if (setv.length>1) out=out.concat(setv);
+		if (out.length>1) return out; else return [];
+	}
+
+	function breakMatch(match) {
+		var popup,a,gives={},tile;
+		AUDIO.play("smallblam");
+		for (var i=0;i<match.length;i++) {
+			popup={x:match[i].x*TILE.size+TILE.hhsize,y:match[i].y*TILE.size+TILE.hhsize,width:TILE.hsize,height:TILE.hsize};
+			tile=TILES[map[match[i].y][match[i].x]];
+			a=tile.gives;
+			if (tile.player) randomizePlayer();
+			if (a) {
+				if (!gives[a]) gives[a]=1; else gives[a]+=gives[a];
+				switch (a) {
+					case "time":{
+						AUDIO.play("extratime");
+						arcadeTime+=Math.ceil(giveratiotime*gives[a]);
+						if (arcadeTime>ALLTIME) arcadeTime=ALLTIME;
+						addSpriteAt(BASICARCADESPRITES.timepopup,popup);
+						break;
+					}
+					case "points":{						
+						pointToLives+=Math.ceil(giveratiopoints*gives[a]);
+						if (pointToLives>allPointToLives) {
+							AUDIO.play("extralife");
+							addSpriteAt(BASICARCADESPRITES.extralifepopup,popup);
+							pointToLives=0;
+							lives++;
+							allPointToLives++;
+						} else {
+							AUDIO.play("extrahealth");
+							addSpriteAt(BASICARCADESPRITES.healthpopup,popup);
+						}
+						break;
+					}
+				}
+			}
+			explodeSprite(popup,tile.explosion);
+			map[match[i].y][match[i].x]=0;
+		}
+	}
+
+	// --- Match-3 mechanics
+
+	var fallTimer,blocksFalling;
+
+	function scheduleFall() {
+		blocksFalling=true;
+		fallTimer=2;
+	}
+
+	function fallBlocks() {
+		if (blocksFalling) {
+			if (fallTimer)
+				fallTimer--;
+			else {
+				var fall=false;
+				for (var y=GRID.rows-1;y>=0;y--)
+					for (var x=0;x<GRID.cols;x++)
+						if (!map[y][x]) {
+							fall=true;
+							if (y) {
+								map[y][x]=map[y-1][x];
+								map[y-1][x]=0;
+							} else if (playerinmap==x) {
+								map[y][x]=randomPlayer();
+								playerinmap=-1;
+							}
+							else
+								map[y][x]=randomTile();
+						}
+				if (fall) {
+					AUDIO.play("step");
+					scheduleFall();
+				}
+				else blocksFalling=false;
+			}
+		}
+	}
+
+	function tileDrag(tile,x,y) {
+		if (map[tile.y]) {
+			var pairdone=false;
+			var from=map[tile.y][tile.x],desTile={
+				x:tile.x+x,
+				y:tile.y+y
+			};
+			var tox=map[desTile.y]==undefined?-1:map[desTile.y][desTile.x]==undefined?-1:map[desTile.y][desTile.x];
+			if ((tox!=-1)&&(from!=tox)) {
+				var newmap=JSON.parse(JSON.stringify(map));
+				newmap[tile.y][tile.x]=tox;
+				newmap[desTile.y][desTile.x]=from;
+				var match1=triggerMatch(newmap,tile.x,tile.y);
+				var match2=triggerMatch(newmap,desTile.x,desTile.y);
+				if (match1.length||match2.length) {
+					pairdone=true;
+					map=newmap;
+					breakMatch(match1);
+					breakMatch(match2);
+					scheduleFall();
+				}
+			}
+			if (!pairdone) {
+				AUDIO.play("negate");
+				setTileEffect(tile.x,tile.y,{type:"shake",timer:10});
+				setTileEffect(desTile.x,desTile.y,{type:"shake",timer:10});
+			}
+		}
+	}
+
+	function drawGrid(ctx,ox,oy) {
+		for (var y=0;y<map.length;y++) {
+			for (var x=0;x<map[y].length;x++) {
+				tiledata=TILES[map[y][x]];
+				if (tiledata) {
+					tileeffect=mapeffects[x+","+y];
+					px=x*TILE.size+ox;
+					py=y*TILE.size+oy;
+					if (tileeffect) {						
+						switch (tileeffect.type) {
+							case "drag":{
+								px+=tileeffect.x;
+								py+=tileeffect.y;
+								break;
+							}
+							case "shake":{
+								px+=shaky();
+								py+=shaky();
+								break;
+							}
+						}
+						if (tileeffect.timer) {
+							tileeffect.timer--;
+							if (!tileeffect.timer) delete mapeffects[x+","+y];
+						}
+					}
+					if (tiledata.spriteX)
+						blitSprite(ctx,tiledata.spriteX,tiledata.spriteY,TILE.size,TILE.size,px,py);
+					else
+						blitRect(ctx,tiledata.color,px,py,TILE.size,TILE.size)
+					if (tiledata.contentX) {
+						var dx=TILE.hhhsize*Math.sin(stageTimer/3);
+						var dy=TILE.hhhsize*Math.cos(stageTimer/3);
+						blitSprite(ctx,tiledata.contentX,tiledata.contentY,TILE.hsize,TILE.hsize,px+TILE.hhsize+dx,py+TILE.hhsize+dy);
+					}
+				}
+			}
+		}
+	}
+
+	// --- INITIALIZATION
+
+	// --- Global variables
+	var arcade;
+	
+	// --- Menu variables
+	var instructionsPage, titleBubbles=[];
+	
+	// --- Play session variable
+	var stageTimer,testTimer,background;
+	var gamegenre,gamegenreid,tilesindex;
+	var ishiscore,arcadeTime,pendingGameStatus,puzzleTime,lives,allPointToLives,pointToLives,gold,goldValue,level,failure;
+
+	// --- Prepare game screen
+
+	var screen=createCanvas(GRID.width+GRID.x+GRID.marginRight,GRID.height+GRID.y+GRID.marginBottom);
+	screen.cnv.style.backgroundColor="#101820";
+	screen.cnv.style.MozOsxFontSmoothing="grayscale";	
+
+	// --- Prepare the arcade game screen
+
+	var arcadecnv=createCanvas(GRID.width,GRID.height);
+
+	// --- Prepare match-3 / arcade transition overlay
+
+	var gridcnv=createCanvas(GRID.width,GRID.height);
+
+	// --- Register and standardize game controls
+
+	var lastPoint,startGesture,dragStart,dragPoint;
+	var events={hold:0,flick:0},stick=-1;
+
+	function pointerDown(point) {
+		lastPoint=point;
+		events.down=true;
+		dragPoint=dragStart=point;
+		switch (gamestate) {			
+			case STATES.TITLESCREEN:{
+				if (installer._area&&(point.y>installer._area[0])&&(point.y<installer._area[1]))
+					installer.install();
+				break;
+			}
+		}		
+	}
+	
+	function pointerMove(point) {
+		lastPoint=point;
+		switch (gamestate) {
+			case STATES.MATCH:{
+				if (dragStart) {
+					dragPoint=point;
+					var dx=dragPoint.x-dragStart.x;
+					var dy=dragPoint.y-dragStart.y;
+					var tilex=Math.floor((dragStart.x-GRID.x)/TILE.size);
+					var tiley=Math.floor((dragStart.y-GRID.y)/TILE.size);										
+					clearEffect("drag");
+					if (Math.abs(dx)>TILE.hsize) {
+						tileDrag({x:tilex,y:tiley},dx>0?1:-1,0);
+						dragStart=0;
+					} else if (Math.abs(dy)>TILE.hsize) {
+						tileDrag({x:tilex,y:tiley},0,dy>0?1:-1);
+						dragStart=0;
+					} else if (map[tiley]&&(map[tiley][tilex]!=undefined)) {
+						if (Math.abs(dx)>Math.abs(dy)) {
+							setTileEffect(tilex,tiley,{type:"drag",x:dx,y:0});
+							if (dx>0) setTileEffect(tilex+1,tiley,{type:"drag",x:-dx,y:0});
+							else setTileEffect(tilex-1,tiley,{type:"drag",x:-dx,y:0});
+						} else {
+							setTileEffect(tilex,tiley,{type:"drag",x:0,y:dy});
+							if (dy>0) setTileEffect(tilex,tiley+1,{type:"drag",x:0,y:-dy});
+							else setTileEffect(tilex,tiley-1,{type:"drag",x:0,y:-dy});							
+						}
+					}
+				}
+				break;
+			}
+			case STATES.ARCADETITLE:
+			case STATES.ARCADE:{
+				if (dragStart) {
+					dragPoint=point;
+					var dx = dragPoint.x-dragStart.x, dy = dragStart.y-dragPoint.y;
+					if (Math.hypot(dx,dy)>10) {
+						stick = (Math.atan2(dx, dy) * 180 / Math.PI);
+						if (stick < 0) stick = 360 + stick;	
+					} else stick=-1;
+				}
+				break;
+			}
+		}
+	}
+	
+	function pointerUp(point) {
+		lastPoint=point;
+		switch (gamestate) {
+			case STATES.SPLASH:{
+				AUDIO=new Audio(mute);
+				gotoState(STATES.LOADING)
+				break;
+			}
+			case STATES.MATCH:{
+				clearEffect("drag");
+				break;
+			}
+		}
+		events.flick={from:dragStart,to:dragPoint,stick:stick};
+		events.down=false;
+		dragPoint=dragStart=0;
+		stick=-1;
+	}
+
+	var isTouch=!!('ontouchstart' in window || navigator.maxTouchPoints);
+
+	if (isTouch) {
+		addEventListener(document.body,"touchstart",function(e) {
+			if (AUDIO) AUDIO.resume();
+			var touch=e.changedTouches[0];
+			pointerDown({x:(touch.clientX-screenLeft)/screenScale,y:(touch.clientY-screenTop)/screenScale});
+			e.preventDefault();
+			return false;
+		},{passive:false});
+		addEventListener(document.body,"touchmove",function(e) {
+			var touch=e.changedTouches[0];
+			pointerMove({x:(touch.clientX-screenLeft)/screenScale,y:(touch.clientY-screenTop)/screenScale});
+			e.preventDefault();
+			return false;
+		},{passive:false});
+		addEventListener(document.body,"touchend",function(e) {
+			if (AUDIO) AUDIO.resume();
+			var touch=e.changedTouches[0];
+			pointerUp({x:(touch.clientX-screenLeft)/screenScale,y:(touch.clientY-screenTop)/screenScale});
+		},{passive:false});
+
+	} else {
+		addEventListener(document.body,"keydown",function(e) { if (e.keyCode==32&&!events.down) pointerDown({x:lastPoint.x,y:lastPoint.y}); });
+		addEventListener(document.body,"keyup",function(e) { if (e.keyCode==32) pointerUp({x:lastPoint.x,y:lastPoint.y}); });
+		addEventListener(document.body,"mousedown",function(e) { pointerDown({x:(e.clientX-screenLeft)/screenScale,y:(e.clientY-screenTop)/screenScale}); });
+		addEventListener(document.body,"mousemove",function(e) { pointerMove({x:(e.clientX-screenLeft)/screenScale,y:(e.clientY-screenTop)/screenScale}); });
+		addEventListener(document.body,"mouseup",function(e) { pointerUp({x:(e.clientX-screenLeft)/screenScale,y:(e.clientY-screenTop)/screenScale}); });
+	}
+
+	// --- Handle screen resize
+
+	var screenLeft,screenTop,screenScale=-1,doresize=10;
+	function resize() {
+		if (screenScale<0) document.body.appendChild(screen.cnv);
+		var pageWidth=document.body.clientWidth,
+			pageHeight=document.body.clientHeight;
+		var 
+			proportion=pageHeight>pageWidth?3:2,
+			xratio=pageWidth/screen.width,
+			yratio=pageHeight/screen.height;
+		if (xratio*screen.height<pageHeight) screenScale=xratio;
+		else screenScale=yratio;
+		screen.cnv.style.display="block";
+		screen.cnv.style.position="absolute";
+		screen.cnv.style.transformOrigin="0 0";
+		screenLeft=Math.floor((pageWidth-(screenScale*screen.width))/2);
+		screenTop=Math.floor((pageHeight-(screenScale*screen.height))/proportion);
+		screen.cnv.style.left=screenLeft+"px";
+		screen.cnv.style.top=screenTop+"px";
+		screen.cnv.style.transform="scale("+screenScale+")";
+	}
+
+	addEventListener(window,"resize",function(e) { doresize=10; });
+
+	// --- GAME STATE MACHINE
+
+	var gamestate,phase,timer;
+	function gotoState(state) {
+		gamestate=state;
+		timer=0;
+		phase=0;
+	}
+
+	// --- BOOTSTRAP
+
+	// --- Load game graphics
+
+	var tilemap,_tilemap=document.createElement("img");
+	_tilemap.style.visibility="hidden";
+	_tilemap.style.position="absolute";
+	_tilemap.style.top="-10000px";
+	_tilemap.src="sprites.png";
+	_tilemap.onload=function() {
+
+		// --- Load game data
+		loadGameData();
+
+		// --- Convert graphics file to canvas
+
+		tilemap=createCanvas(_tilemap.width,_tilemap.height);
+		tilemap.ctx.drawImage(_tilemap,0,0);
+		document.body.removeChild(_tilemap);
+
+		// --- Prerender fonts
+
+		FONT.data=tilemap.ctx.getImageData(FONT.x,FONT.y,FONT.width,FONT.height).data;
+		FONT.small=makeFont(PALETTE,1,1);
+		FONT.normal=makeFont(PALETTE,2,2);
+		FONT.large=makeFont(PALETTE,3,3);		
+
+		// --- Game code
+
+		gotoState(STATES.SPLASH);
+
+		var _nextFrame=0;
+
+		// --- Telemetry
+
+		var _nowsec,_now,_lastfps,_fps=0;
+		function doTelemetry(now) {
+			_nowsec=Math.floor(now/1000);
+			if (_nowsec==_now) _fps++; else {
+				_lastfps=_fps;
+				_fps=0;
+				_now=_nowsec;				
+			}
+			blitText(screen,FONT.small,2,0,0,_lastfps+"fps:"+(arcade?arcade.sprites.length:0)+HEARTSYMBOL+":"+arcadeAllGold+"$");
+		}
+				
+		function run() {
+			var now=getTimestamp();
+			if (now>_nextFrame) {
+				_nextFrame=Math.ceil(now/MSPF)*MSPF;
+
+				if (doresize) {
+					doresize--,
+					resize();
+				}
+				switch (gamestate) {
+					case STATES.SPLASH:{
+						clearScreen();
+						var oy=80;
+						blitText(screen,FONT.normal,1,GRID.cx,oy-FONT.normal.lh-10+wavy(),HEARTSYMBOL+" T I G H T Y "+HEARTSYMBOL,2);
+						blitSprite(screen,322,382,311,76,12,oy+wavy());
+						blitText(screen,FONT.normal,blinkColors(1,2),GRID.cx,oy+100,HEARTSYMBOL+" HIT ANYWHERE "+HEARTSYMBOL,2);
+						blitText(screen,FONT.normal,blinkColors(1,2),GRID.cx,oy+FONT.normal.lh+100,HEARTSYMBOL+" TO START! "+HEARTSYMBOL,2);
+						blitText(screen,FONT.small,7,GRID.cx,screen.height-FONT.small.lh-5,"version "+VERSION,2);
+						break;
+					}
+					case STATES.LOADING:{
+						clearScreen();
+						if (timer==0) {							
+							// --- LOAD AUDIO
+							AUDIO.addNoise("coin",{"wave":"square","decay":0.15,"release":0.316,"frequency":1285,"tremoloFrequency":50,"tremoloDepth":0.26,"frequencyJump1onset":0.11,"frequencyJump1amount":0.42});
+							AUDIO.addNoise("blam",{"wave":"whitenoise","sustain":0.28,"decay":0.09,"release":0.332,"frequency":1465,"pitch":-0.0015});
+							AUDIO.addNoise("beep",{"wave":"breaker","attack":0.009,"sustain":0.116,"decay":0.123,"release":0.2,"pitch":0.0008});
+							AUDIO.addNoise("loselife",{"wave":"square","attack":0.006,"sustain":0.2,"decay":0,"release":0.2,"frequency":430,"frequencyJump1onset":0.14,"frequencyJump1amount":-1});
+							AUDIO.addNoise("beepup",{"wave":"tangent","decay":0.03,"release":0.2,"pitch":0.0006});
+							AUDIO.addNoise("beepdown",{"wave":"tangent","decay":0.03,"release":0.2,"pitch":-0.0006});
+							AUDIO.addNoise("dash",{"wave":"whitenoise","decay":0.006,"release":0.2,"frequency":1330,"pitch":0.001});
+							AUDIO.addNoise("bump",{"wave":"square","decay":0,"release":0.2,"frequency":100,"pitch":-0.0012});
+							AUDIO.addNoise("slide",{"wave":"whitenoise","attack":0.108,"limit":0.28,"decay":0,"release":0.4,"frequency":1600});
+							AUDIO.addNoise("extrahealth",{"wave":"triangle","attack":0.006,"sustain":0.112,"decay":0.156,"release":0.324,"pitch":0.0004,"frequencyJump1onset":0.36,"frequencyJump1amount":0.12});
+							AUDIO.addNoise("extralife",{"wave":"square","sustain":0.276,"decay":0.189,"release":0.2,"tremoloFrequency":50,"tremoloDepth":1,"pitch":0.0006});
+							AUDIO.addNoise("extratime",{"wave":"breaker","sustain":0.108,"decay":0.024,"release":0.2,"pitch":-0.0015});
+							AUDIO.addNoise("smallblam",{"wave":"whitenoise","decay":0.027,"release":0.2});
+							AUDIO.addNoise("fail",{"wave":"square","attack":0.003,"sustain":0.008,"decay":0.138,"release":0.2,"pitch":-0.002,"frequencyJump1onset":0.08,"frequencyJump1amount":-0.3,"frequencyJump2onset":0.25,"frequencyJump2amount":0.36});
+							AUDIO.addNoise("gameover",{"wave":"square","attack":0.15,"sustain":0.2,"decay":0.3,"release":0.4,"pitch":-0.002,"frequencyJump1onset":0.11,"frequencyJump1amount":0.28,"frequencyJump2onset":0.27,"frequencyJump2amount":0.06});
+							AUDIO.addNoise("step",{"wave":"square","decay":0,"release":0.02,"frequency":130});
+							AUDIO.addNoise("negate",{"wave":"square","attack":0.006,"sustain":0.104,"decay":0.021,"release":0.196,"frequency":220,"frequencyJump1onset":0.14,"frequencyJump1amount":-0.36});
+							AUDIO.addNoise("alarm0",{"wave":"square","decay":0.009,"frequency":445,"release":0.192,"tremoloFrequency":50,"tremoloDepth":1});
+							AUDIO.addNoise("alarm1",{"wave":"square","decay":0.009,"frequency":685,"release":0.192,"tremoloFrequency":50,"tremoloDepth":1});
+							AUDIO.addNoise("ready",{"wave":"triangle","frequency":1135,"sustain":0.4,"decay":0.3,"release":0.4,"frequencyJump1onset":0.24,"frequencyJump1amount":-0.58,"frequencyJump2onset":0.16,"frequencyJump2amount":0.48,"tremoloFrequency":50,"tremoloDepth":1});
+
+							for (var i=0;i<10;i++)		
+								AUDIO.addNoise("scale"+i,{"wave":"triangle","decay":0.009,"frequency":445+(i*30),"release":0.192,"tremoloFrequency":50,"tremoloDepth":1});
+
+							AUDIO.loadAudio(!_DEBUGNOMUSIC?[
+								{id:"m3-bgm0",file:"music/finalvoice"},
+								{id:"m3-bgm1",file:"music/kinetix"},
+								{id:"m3-bgm2",file:"music/hollow"},
+								{id:"ar-bgm0",file:"music/strollingcats"},
+								{id:"ar-bgm1",file:"music/coolmusax"}
+							]:[]);
+						}
+						blitText(screen,FONT.normal,1,screen.width/2+wavy(),screen.height/2,"Loading...",2)
+						if (!AUDIO.audioLoading) gotoState(STATES.TITLE);
+						break;
+					}
+					case STATES.TITLE:{
+						clearScreen();
+						if (timer>LOADTIME) {
+							gotoPlayAfterPage=-1;
+							calculateCompletion();
+							AUDIO.stopMusic();
+							if (_DEBUGGAME)
+								gotoState(STATES.NEWGAME);
+							else {
+								AUDIO.play("beepup");
+								gotoState(STATES.TITLESCREEN);
+							}
+						}
+						break;
+					}
+					case STATES.TITLESCREEN:{
+						clearScreen();
+						for (var i=0;i<20;i++) {
+							if (!titleBubbles[i]||(titleBubbles[i].y>screen.height))
+								titleBubbles[i]={
+									x:random(0,screen.width-TILE.size),
+									y:-TILE.size,
+									speedY:random(2,6)
+								}
+							titleBubbles[i].y+=titleBubbles[i].speedY;
+							blitSprite(screen,1,1,TILE.size,TILE.size,titleBubbles[i].x,titleBubbles[i].y);
+						}
+						var hb=Math.floor(GRID.width/2)-5,c=0,size,oy=50+(installer.canInstall()?0:10)+Math.sin(timer/20)*10, y=0;
+						var hhb=hb/2,palette=TITLEPALETTES[Math.floor(timer/250)%TITLEPALETTES.length];
+						while (y<76) {
+							size=7+Math.floor(Math.sin((c+timer)*0.1)*6);
+							if (y+size>76) size=76-y;
+							blitRect(screen,palette[c%palette.length],12,oy+y,310,size);
+							y+=size;
+							c++;
+						}
+						blitSprite(screen,322,382,311,76,12,oy);
+						blitText(screen,FONT.normal,1,GRID.cx,oy-FONT.normal.lh-10,HEARTSYMBOL+" T I G H T Y "+HEARTSYMBOL,2);
+
+						var nextstate,y=screen.height-TILE.size;
+						blitRect(screen,7,GRID.x,y,GRID.width,TILE.hsize);
+						blitRect(screen,2,GRID.x,y,GRID.width/100*completion,TILE.hsize);
+						blitText(screen,FONT.small,1,GRID.cx,y+2,"CAREER: "+completion+"%",2);
+						y-=20;
+						blitText(screen,FONT.small,2,GRID.cx,y+2,HEARTSYMBOL+" RICHEST DESIGNER: "+hiscore+"$ "+HEARTSYMBOL,2);
+						y-=100;
+						blitRect(screen,5,GRID.x,y,GRID.width,90);
+						if (pendingGameStatus)
+							blitText(screen,FONT.large,blinkColors(1,2),GRID.cx+wavy(),y+(90-FONT.large.lh)/2,"CONTINUE!",2);
+						else
+							blitText(screen,FONT.large,blinkColors(1,2),GRID.cx+wavy(),y+(90-FONT.large.lh)/2,Math.floor(timer/125)%2?"WORK!":"PLAY!",2);
+						if (!nextstate&&(events.hold==1)&&(dragStart.y>y))
+							if (pendingGameStatus)
+								nextstate=pendingGameStatus;
+							else if (alreadyPlayed)
+								nextstate=STATES.NEWGAME;
+							else {
+								gotoPlayAfterPage=1;
+								instructionsPage=0;
+								nextstate=STATES.INSTRUCTIONS;
+								AUDIO.playMusic("m3-bgm2");
+							}	
+						y-=50;
+						blitRect(screen,7,GRID.x,y,hb,40);
+						blitRect(screen,7,GRID.x+hb+10,y,hb,40);
+						blitText(screen,FONT.normal,1,GRID.x+hhb,y+(40-FONT.normal.lh)/2,"MANUAL",2);
+						blitText(screen,FONT.normal,1,GRID.x+hb+10+hhb,y+(40-FONT.normal.lh)/2,mute?"MUTED":"AUDIO ON",2);
+						if (!nextstate&&(events.hold==1)&&(dragStart.y>y)) {
+							if (dragStart.x<screen.width/2) {
+								nextstate=STATES.INSTRUCTIONS;
+								instructionsPage=0;
+								AUDIO.playMusic("m3-bgm2");
+							} else {
+								setMute(!mute);
+								if (!mute) AUDIO.play("coin");
+							}
+						}
+						if (installer.canInstall()) {
+							y-=50;
+							blitRect(screen,7,GRID.x,y,GRID.width,40);
+							blitText(screen,FONT.normal,1,GRID.cx,y+(40-FONT.normal.lh)/2,"INSTALL",2);
+							installer._area=[y,y+40];
+						} else installer._area=0;
+						if (nextstate) {
+							AUDIO.play("beepup");
+							gotoState(nextstate);
+						}
+						break;
+					}
+					case STATES.INSTRUCTIONS:{
+						var x,y,line,step=timer/2-3,page=INSTRUCTIONS[instructionsPage];
+						clearScreen();
+						if (page) {
+							if (step>page.length) {
+								if (events.hold==1) {
+									setFirstPlay();
+									AUDIO.play("beepdown");
+									timer=0;
+									if (gotoPlayAfterPage==instructionsPage)
+										gotoState(STATES.NEWGAME);
+									else
+										instructionsPage++;
+								}
+								step=page.length;
+							}
+							if (step>0) {
+								if ((step<page.length)&&(timer%2==0)) AUDIO.play("step");
+								y=TILE.hhsize;				
+								for (var i=0;i<step;i++) {
+									line=page[i];
+									if (line.paint) {
+										x=line.paint.width+TILE.hsize;
+										blitSprite(screen,line.paint.x,line.paint.y,line.paint.width,line.paint.height,TILE.hhsize,y);
+									} else if (line.space)
+										y+=8;
+									else if (line.animation){
+										switch (line.animation) {
+											case 1:{
+												var spdx,spdy,dx,dy,gapx,gapy;
+												blitRect(screen,4,0,y,screen.width,100);												
+												for (var j=0;j<5;j++)
+													blitSprite(screen,408,460,142,100,-timer%142+(142*j),y);
+												for (var j=0;j<2;j++)
+													for (var q=0;q<20;q++) {
+														spdy=10+q+(j*2);
+														spdx=50+q+(j*10);
+														dx=Math.floor(Math.sin(j+q/2)*screen.width)-(j*25);
+														dy=j*5+(Math.floor(Math.abs(Math.cos(q))*10));
+														gapy=Math.floor(Math.sin(timer/spdy)*3);
+														gapx=Math.floor(Math.sin(timer/spdx)*20);
+														blitSprite(screen,322,460,41,59-gapy-dy,30+gapx+dx,y+41+gapy+dy,timer%2);
+													}
+												y+=108;
+												break;
+											}
+										}
+									} else {	
+										if (line.pad) 
+											blitText(screen,FONT[line.font],line.color,x,y,line.text);
+										else
+											blitText(screen,FONT[line.font],line.color,GRID.cx,y,line.text,2);
+										
+										y+=FONT[line.font].lh;
+									}
+								}
+							}
+						} else if (timer>LOADTIME) gotoState(STATES.TITLE);
+						
+						break;
+					}
+					case STATES.NEWGAME:{
+						endGame();
+
+						stages=[];
+						chapters={};
+						stageTimer=0;
+						arcadeTime=STARTARCADETIME;
+						puzzleTime=STARTPUZZLETIME;
+						timeBonus=1;
+						lives=5;
+						allPointToLives=5;
+						pointToLives=0;
+						level=0;
+						gold=0;
+						salary=0;
+
+						// Prepare stages sequence
+						var allGames=[],lockedGames=[];
+						for (var i=0;i<TILES.length;i++)
+							if (TILES[i].gamegenre)
+								if (unlocked[TILES[i].gamegenre]) allGames.push(i);
+								else lockedGames.push(i);
+						shuffle(allGames);
+						shuffle(lockedGames);
+						for (var i=0;i<lockedGames.length;i++)
+							allGames.push(lockedGames[i]);
+
+						var rounds=Math.ceil(allGames.length/GAMESPERROUND);
+						var gamehead;
+
+						for (var i=0;i<rounds;i++) {						
+							for (var q=0;q<GAMESPERROUND;q++) {
+								gamehead=i*GAMESPERROUND+q;
+								for (var j=0;j<LEVELSPERGAME;j++)
+									if (allGames[gamehead])
+										stages.push({
+											games:[allGames[gamehead]]
+										});
+									else
+										break;
+							}
+							if (allGames[gamehead]) {
+								var gameset=[];
+								for (var j=0;j<=gamehead;j++) gameset.push(allGames[j])
+								for (var j=0;j<LEVELSPERENDROUND;j++)
+									stages.push({
+										games:gameset
+									});	
+							}						
+						}
+
+						stages.push({
+							games:allGames
+						});
+
+						if (_DEBUGGAME) {
+							lives=_DEBUGLIVES;
+							puzzleTime=0;
+							arcadeTime=_DEBUGARCADETIME;
+						}
+
+						gotoState(STATES.NEWGRID);
+						break;
+					}
+					case STATES.NEWGRID:{
+						if (timer==1) saveGame(STATES.NEWGRID);
+
+						if (stages[level])
+							stage=stages[level];
+						else
+							stage=stages[stages.length-1];
+
+						specialblockodds=Math.floor(sineTrend(level,20,50));
+						blockodds=Math.floor(sineTrend(level,30,70,2));
+						enemyodds=Math.floor(sineTrend(level,30,70,4.5));
+						giveratiopoints=1;
+						giveratiotime=linearTrend(level,3,0.5,40)*timeBonus;
+
+						stageTimer=0;
+						var row;
+						map=[];
+						mapeffects={};
+						scheduleFall();
+						for (var i=0;i<GRID.rows;i++) map.push([]);						
+						playerinmap=-1;
+						AUDIO.stopMusic();
+						gotoState(STATES.STARTMATCH);
+						break;
+					}
+					case STATES.STARTMATCH:{
+						resetArcade();
+						drawHud();
+						if (timer>15) {
+							fallBlocks();
+							drawMap();
+							if (!blocksFalling) {								
+								var step=(timer-60)/5;
+								if (step==1) AUDIO.play("beep");
+								if (step>1) {
+									blitSprite(screen,0,283,GRID.width,GRID.height,GRID.x,GRID.y);
+									blitText(screen,FONT.normal,1,GRID.cx,GRID.cy-25,"PROJECT "+(level+1),2);					
+								}
+								if (step==7) {
+									AUDIO.play("blam");
+									AUDIO.playMusic("m3-bgm"+(Math.floor(level/LEVELSPERSEGMENT)%M3MUSICS));
+								}
+								if (step>7)
+									blitText(screen,FONT.large,blinkColors(1,5),GRID.cx+shaky(),GRID.cy+shaky(),"DESIGN!",2);					
+								if (step>14) {
+									if (_DEBUGGAME)
+										map[4][4]=randomPlayer();
+									else									
+										randomizePlayer();
+									gotoState(STATES.MATCH);
+								}			
+							}
+						}
+						break;
+					}
+					case STATES.MATCH:{
+						if (puzzleTime) puzzleTime--;
+						else gotoState(STATES.WAITFALL);
+						drawHud();
+						drawMap(true);
+						runArcade(true);
+						fallBlocks();
+						break;
+					}
+					case STATES.WAITFALL:{
+						clearEffect("drag");
+						if (!blocksFalling)
+							gotoState(STATES.ENDMATCH);
+						else
+							fallBlocks();
+						drawHud();
+						drawMap();
+						runArcade(true);
+						break;
+					}
+					case STATES.ENDMATCH:{
+						if (timer==1) {
+							saveGame(STATES.CONVERTMATCH);
+							AUDIO.play("blam");
+							AUDIO.stopMusic();
+						}
+						drawHud();
+						drawMap();
+						runArcade(true);
+						blitSprite(screen,0,283,GRID.width,GRID.height,GRID.x,GRID.y);
+						blitText(screen,FONT.large,blinkColors(1,3),GRID.cx+shaky(),GRID.cy+shaky(),"DESIGN OVER!",2);
+						if (timer>25) gotoState(STATES.CONVERTMATCH);
+						break;
+					}
+					case STATES.CONVERTMATCH:{						
+						var sprite,maptile;
+						tilesindex={};
+						resetArcade();
+						testTimer=0;
+						background=0;
+						for (var y=0;y<map.length;y++)
+							for (var x=0;x<map[y].length;x++)
+								if (TILES[map[y][x]].gamegenre) {
+									gamegenreid=TILES[map[y][x]].gamegenre;
+									gamegenre=GAMEGENRES[gamegenreid];
+								}
+
+						for (var y=0;y<map.length;y++)
+							for (var x=0;x<map[y].length;x++) {
+								maptile=TILES[map[y][x]];							
+								if (maptile.sprite) {
+									if (!tilesindex[maptile.sprite]) tilesindex[maptile.sprite]=0;
+									tilesindex[maptile.sprite]++;
+									if (gamegenre) {
+										sprite=gamegenre[maptile.sprite];
+										if (sprite)
+											gamegenre.addSprite(sprite,x*TILE.size+Math.floor((TILE.size-sprite.width)/2),y*TILE.size+Math.floor((TILE.size-sprite.height)/2),x,y);
+									}
+								}
+							}
+						if (gamegenre&&gamegenre.finalizeStage) gamegenre.finalizeStage();
+
+						tilesindex.foe|=0;
+						tilesindex.gold|=0;
+						goldValue=tilesindex.foe+level+Math.floor(lives/3)+salary;
+
+						if (!arcadeTime) failure="No time!";
+						else if (!gamegenre) failure="No player!";
+						else if (!tilesindex.gold) failure="No gold!";
+						else {
+							unlockGame(gamegenreid);
+							background=clone(randomElement(gamegenre.background));
+							background.color=randomElement(background.color);
+							if (background.scrollx) background.scrollx=randomElement(background.scrollx);
+							if (background.scrolly) background.scrolly=randomElement(background.scrolly);
+							if (background.map) background.map=randomElement(background.map);
+							failure=0;
+							if (chapters[gamegenreid]==undefined) chapters[gamegenreid]=0;
+							else chapters[gamegenreid]=limit(chapters[gamegenreid]+1,1,CHAPTERS.length-1);
+							edition=randomElement(CHAPTERS[chapters[gamegenreid]]),
+							goldValue+=CHAPTERS.length-chapters[gamegenreid];
+							timepercoin=Math.floor(linearTrend(level,ALLTIME/4,ALLTIME/8,20));						
+						}
+
+						arcadeDeaths=0;
+						arcadeAllGold=0
+						arcadeGold=0;
+						arcadeEarnings=0;
+
+						blitRect(gridcnv,0,0,0,GRID.width,GRID.height);
+						if (gamegenre&&!gamegenre.hideGrid) drawGrid(gridcnv,0,0);
+						if (_DEBUGGAME)
+							gotoState(STATES.ARCADETITLE);
+						else
+							gotoState(STATES.DEBRIEFMATCH);
+						break;
+					}
+					case STATES.DEBRIEFMATCH:{
+						drawHud();					
+						if (!gamegenre||!gamegenre.hideGrid) {
+							drawMap();
+							blitSprite(screen,0,283,GRID.width,GRID.height,GRID.x,GRID.y);
+						}
+						var y=GRID.y,step=timer/5;
+						if (step>1) {
+							blitText(screen,FONT.large,failure?1:blinkColors(1,3),GRID.cx,y+(failure?0:wavy()),"- RESULTS -",2);
+							y+=FONT.large.lh+15;
+						}
+						if (step>2) {
+							blitSprite(screen,35,35,TILE.size,TILE.size,GRID.x+TILE.size,y);
+							blitText(screen,FONT.normal,1,GRID.x+(TILE.size*2)+10,y+((TILE.size-FONT.normal.lh)/2),"Foes");
+						}
+						if (step>3) {
+							blitText(screen,FONT.normal,1,GRID.x+GRID.width-TILE.size,y+((TILE.size-FONT.normal.lh)/2),tilesindex.foe,1);
+							y+=TILE.size+15;
+						}
+						if (step>4) {
+							blitSprite(screen,69,35,TILE.size,TILE.size,GRID.x+TILE.size,y);
+							blitText(screen,FONT.normal,1,GRID.x+(TILE.size*2)+10,y+((TILE.size-FONT.normal.lh)/2),"Salary");
+						}
+						if (step>5) {
+							blitText(screen,FONT.normal,1,GRID.x+GRID.width-TILE.size,y+((TILE.size-FONT.normal.lh)/2),salary+"$",1);
+							y+=TILE.size+15;
+						}
+						if (step>6) {
+							blitRect(screen,1,GRID.x+TILE.size,y,GRID.width-(TILE.size*2),(FONT.normal.lh*2)+15);
+							blitText(screen,FONT.normal,0,GRID.cx,y+5,"Coin value",2);
+							blitText(screen,FONT.normal,failure?0:blinkColors(0,2),GRID.cx,y+FONT.normal.lh+10,goldValue+"$",2);
+							y+=(FONT.normal.lh*2)+30;
+						}
+						if (step>7) {
+							if (failure)
+								blitText(screen,FONT.normal,1,GRID.cx,y,"Sorry...",2);
+							else
+								blitText(screen,FONT.normal,1,GRID.cx,y,"Now playtesting",2);
+							y+=TILE.size+9;
+						}
+						if (step>8) {
+							if (failure)
+								blitText(screen,FONT.large,blinkColors(1,7),GRID.cx+wavy(),y,failure,2);
+							else
+								blitText(screen,FONT.large,blinkColors(1,5),GRID.cx,y+wavy(),gamegenre.title,2);
+							y+=FONT.large.lh+4;
+						}
+						if (step>9)
+							if (!failure&&edition) {
+								blitRect(screen,1,GRID.x+TILE.size,y+wavy(),GRID.width-(TILE.size*2),(FONT.small.lh+4));
+								blitText(screen,FONT.small,0,GRID.cx,y+2+wavy(),edition,2);
+							}
+
+						if (timer%5==0) {
+							if (step<9) AUDIO.play("beepup");
+							else if (step==9)
+								if (failure) AUDIO.play("fail");
+								else AUDIO.play("extralife");
+						}
+
+
+						if (step>10)
+							if (events.hold==1)
+								if (failure)
+									gotoState(STATES.GAMEOVER);
+								else
+									gotoState(STATES.ARCADERENDERING);
+						break;
+					}
+					case STATES.ARCADERENDERING:{					
+						drawHud(true);
+						runArcade();
+						var progress=timer*10;
+						if (progress<GRID.width) {
+							if (timer%2==0) AUDIO.play("scale"+Math.floor(progress/GRID.width*10));
+							var dx=GRID.x+progress;						
+							blitRect(screen,1,dx-TILE.hhhsize,GRID.y,TILE.hhhsize,GRID.height);
+							screen.ctx.drawImage(gridcnv.cnv,progress,0,GRID.width-progress,GRID.height,dx,GRID.y,GRID.width-progress,GRID.height);
+							for (var i=0;i<10;i++)
+								arcade.addSprite(BASICARCADESPRITES.poof,progress,random(0,GRID.height)).speedX-1;
+						} else {
+							AUDIO.play("ready");
+							gotoState(STATES.ARCADETITLE);
+						}
+						break;
+					}
+					case STATES.ARCADETITLE:{
+						var hb=(gamegenre.instructions.length*FONT.small.lh)+FONT.normal.lh+10;
+						var dostart=false,vy=GRID.y+GRID.height-hb-10+wavy();
+						drawHud(true);
+						runArcade();
+						blitRect(screen,1,GRID.x,vy-5,GRID.width,hb+10);
+						blitText(screen,FONT.normal,5,GRID.cx,vy,gamegenre.title,2);
+						vy+=FONT.normal.lh+10;
+						for (var i=0;i<gamegenre.instructions.length;i++) {
+							blitText(screen,FONT.small,0,GRID.cx,vy,gamegenre.instructions[i],2);
+							vy+=FONT.small.lh;
+						}
+						switch (gamegenre.startGesture) {
+							case "swipeleftright":{
+								if (stick>-1) {
+									if (stick<180) startGesture="swiperight";
+									else startGesture="swipeleft";
+									dostart=true;
+								}
+								break;
+							}
+							case "tap":{
+								if (events.flick) {
+									startGesture="tap";
+									dostart=true;
+								}
+								break;
+							}
+						}
+						if (dostart) {
+							AUDIO.play("beepup");
+							gotoState(STATES.ARCADE);
+							AUDIO.playMusic("ar-bgm"+(level%ARCADEMUSICS));
+						}
+						break;
+					}
+					case STATES.ARCADE:{					
+						drawHud(true);
+						runArcade(true);
+						if (lives) {
+							testTimer++;
+							stageTimer=0;
+							if (!--arcadeTime)
+								gotoState(STATES.ARCADEOVER);
+						} else if (stageTimer>50)
+							gotoState(STATES.GAMEOVER);
+						break;
+					}
+					case STATES.ARCADEOVER:{
+						if (timer==1) {
+							saveGame(STATES.EVALUATEARCADE);
+							AUDIO.stopMusic();
+							AUDIO.play("blam");
+						}
+						drawHud(true);
+						runArcade();
+						blitSprite(screen,0,283,GRID.width,GRID.height,GRID.x,GRID.y);
+						blitText(screen,FONT.large,blinkColors(1,3),GRID.cx+shaky(),GRID.cy+shaky(),"TEST OVER!",2);
+						if (timer>25) gotoState(STATES.EVALUATEARCADE);
+						break;
+					}
+					case STATES.EVALUATEARCADE:{						
+						if (!puzzleTime)
+							failure={
+								label:"Time over!",
+								sound:"fail",
+								gameOver:1
+							}
+						else {
+							var rank=RANKS[Math.floor((RANKS.length-1)*limit(arcadeGold-arcadeDeaths,0,arcadeAllGold)/arcadeAllGold)];
+							timeBonus=rank.bonusTime;
+							salary+=rank.bonusSalary;
+							failure={
+								label:randomElement(rank.label),
+								sound:rank.sound,
+								description:rank.description
+							}							
+						}
+						gotoState(STATES.DEBRIEFARCADE);
+						break;
+					}
+					case STATES.DEBRIEFARCADE:{
+						drawHud(true);
+						runArcade();
+						blitSprite(screen,0,283,GRID.width,GRID.height,GRID.x,GRID.y);
+						var y=GRID.y,step=timer/5;
+						if (step>1) {
+							blitText(screen,FONT.large,failure?1:blinkColors(1,3),GRID.cx,y+(failure?0:wavy()),"- RESULTS -",2);
+							y+=FONT.large.lh+15;
+						}
+						if (step>2) {
+							blitSprite(screen,35,35,TILE.size,TILE.size,GRID.x+TILE.size,y);
+							blitText(screen,FONT.normal,1,GRID.x+(TILE.size*2)+10,y+((TILE.size-FONT.normal.lh)/2),"Deaths");
+						}
+						if (step>3) {
+							blitText(screen,FONT.normal,1,GRID.x+GRID.width-TILE.size,y+((TILE.size-FONT.normal.lh)/2),arcadeDeaths,1);
+							y+=TILE.size+15;
+						}
+						if (step>4) {
+							blitSprite(screen,69,35,TILE.size,TILE.size,GRID.x+TILE.size,y);
+							blitText(screen,FONT.normal,1,GRID.x+(TILE.size*2)+10,y+((TILE.size-FONT.normal.lh)/2),"Gold");
+						}
+						if (step>5) {
+							blitText(screen,FONT.normal,1,GRID.x+GRID.width-TILE.size,y+((TILE.size-FONT.normal.lh)/2),arcadeGold,1);
+							y+=TILE.size+15;
+						}
+						if (step>6) {
+							blitRect(screen,1,GRID.x+TILE.size,y,GRID.width-(TILE.size*2),(FONT.normal.lh*2)+15);
+							blitText(screen,FONT.normal,0,GRID.cx,y+5,"Your earnings",2);
+							blitText(screen,FONT.normal,failure?0:blinkColors(0,2),GRID.cx,y+FONT.normal.lh+10,arcadeEarnings+"$",2);
+							y+=(FONT.normal.lh*2)+30;
+						}
+						if (step>7) {
+							if (failure.gameOver)
+								blitText(screen,FONT.normal,1,GRID.cx,y,"Sorry...",2);
+							else
+								blitText(screen,FONT.normal,1,GRID.cx,y,"Your boss says:",2);
+							y+=TILE.size+9;
+						}
+						if (step>8) {
+							if (failure.gameOver)
+								blitText(screen,FONT.large,blinkColors(1,7),GRID.cx+wavy(),y,failure.label,2);
+							else
+								blitText(screen,FONT.large,blinkColors(1,5),GRID.cx,y+wavy(),failure.label,2);
+							y+=FONT.large.lh+4;
+						}
+						if (step>9)
+							if (failure.description) {
+								blitRect(screen,1,GRID.x+TILE.size,y+wavy(),GRID.width-(TILE.size*2),(FONT.small.lh+4));
+								blitText(screen,FONT.small,0,GRID.cx,y+2+wavy(),failure.description,2);
+							}
+
+						if (timer%5==0) {
+							if (step<9) AUDIO.play("beepup");
+							else if (step==9) AUDIO.play(failure.sound);
+						}
+
+						if (step>10)
+							if (events.hold==1)
+								if (failure.gameOver)
+									gotoState(STATES.GAMEOVER);
+								else {
+									level++;
+									gotoState(STATES.NEWGRID);
+								}
+						break;
+					}
+					case STATES.GAMEOVER:{
+						if (timer==1) {
+							endGame();
+							AUDIO.stopMusic();
+							ishiscore=false;
+							if (gold>hiscore) {
+								setHiScore(gold);
+								ishiscore=true;						
+							}
+						}
+						drawHud();
+						if (timer>10) {
+							if (timer==11) AUDIO.play("beepup");
+							if (timer>11) blitText(screen,FONT.normal,5,GRID.cx,GRID.cy-42,"SORRY, YOU ARE",2);
+							if (timer==21) AUDIO.play("gameover");
+							if (timer>21) blitText(screen,FONT.large,5,GRID.cx+wavy(),GRID.cy-20,HEARTSYMBOL+" FIRED! "+HEARTSYMBOL,2);							
+							if (timer>31)
+								if (ishiscore)
+									blitText(screen,FONT.normal,blinkColors(1,3),GRID.cx,GRID.cy+FONT.large.lh+5-20,HEARTSYMBOL+" NEW HIGH SCORE "+HEARTSYMBOL,2);
+							if (events.hold==1) gotoState(STATES.TITLE);
+						}
+						break;
+					}
+				}
+				if (events.down) events.hold++; else events.hold=0;
+				events.flick=0;
+				stageTimer++;
+				timer++;
+				if (_DEBUGTELEMETRY) doTelemetry(now);		
+			}
+
+			window.requestAnimationFrame(run);
+		}
+
+		run();
+	};
+	document.body.appendChild(_tilemap);
+})();
+
+
+
+}
+
+</script>
+</html>

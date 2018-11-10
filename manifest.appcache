@@ -1,0 +1,12 @@
+CACHE MANIFEST
+
+# Tighty Deadline - v1
+# - MP3 is widespread so OGG files are NOT cached for now.
+# - appcache is no longer used
+index.html
+sprites.png
+music/coolmusax.mp3
+music/finalvoice.mp3
+music/hollow.mp3
+music/kinetix.mp3
+music/strollingcats.mp3
